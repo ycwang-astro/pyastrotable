@@ -6,6 +6,8 @@ Of course, you can do anything you want with `astropy`, `numpy`, `matplotlib`, e
 
 Please note that this project is still in its early stage, and the names of the APIs, modules and even the package itself might be changed in a future update. Currently, the main features of this package include:
 - Matching and merging catalogs
+- Row subsets or groups of row subsets of catalogs
+- Easily making plots comparing different subsets
 
 ## Installation
 
@@ -15,8 +17,16 @@ pip install git+https://github.com/ycwang-astro/pyastrotable.git
 ```
 
 ## Documentation
-For tutorials, see [tutorial on matching](https://github.com/ycwang-astro/pyastrotable/blob/main/tutorial1_matching.ipynb).
+For tutorials, see [tutorial on matching](https://github.com/ycwang-astro/pyastrotable/blob/main/tutorial1_matching.ipynb) and tutorial on subsets (coming soon).
 
 ## Future updates
 Planned future updates:
-- New feature: subsets
+- More documentation and demostrations
+- New feature: convenient plotting functions
+
+## Change log
+### 0.2.0
+New features:
+- Row subsets or groups of row subsets of catalogs
+- Easily making plots comparing different subsets
+- Applying functions to each row of the catalog

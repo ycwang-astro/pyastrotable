@@ -6,6 +6,11 @@ Created on Sat Jul 30 2022
 """
 
 import numpy as np
+import warnings
+import pickle
+import os
+
+#%% array/Iterable operation
 
 def find_idx(array, values):
     '''
@@ -39,6 +44,17 @@ def find_idx(array, values):
     idx[not_found] = -l-1
     return idx, found
 
+def grid(x, y, flat=False):
+    if flat:
+        xx = [xi for yi in y for xi in x]
+        yy = [yi for yi in y for xi in x]
+    else:
+        xx = [[xi for xi in x] for yi in y]
+        yy = [[yi for xi in x] for yi in y]
+    return xx, yy
+
+#%% basic types
+
 # Modified dictionary. If each value has the same length, it is similar to pandas.DataFrame, but simpler.
 class objdict(dict):
     # from https://goodcode.io/articles/python-dict-object/?msclkid=daff3822c47111eca4f572e5716ccae3
@@ -56,4 +72,99 @@ class objdict(dict):
             del self[name]
         else:
             raise AttributeError("No such attribute: " + name)
+
+#%% interactive functions
+
+def pause_and_warn(message=' ', choose='Proceed?', default = 'n', yes_message='', no_message='raise', timeout=None):
+    '''
+    calling this function will do something like this:
+            [print]  <message>
+            [print]  <choose> y/n >>> 
+    default choice is <default>
+    if yes:
+            [print] <yes_message>
+    if no:
+            [print] <no_message>
+        if no_message is 'raise':
+            [raise] Error: <message>
+    [return] the choise, True for yes, False for no.
+    '''
+    print('{:-^40}'.format('[WARNING]'))
+    
+    if isinstance(message, Exception):
+        message = str(type(message)).replace('<class \'','').replace('\'>', '')+': '+'. '.join(message.args)
+    warnings.warn(message)
+    print(message)
+    
+    question = '{} {} >>> '.format(choose, '[y]/n' if default == 'y' else 'y/[n]')
+    if timeout is None:
+        cont = input(question)
+    else:
+        raise NotImplementedError
+    if not cont in ['y', 'n']:
+        cont = default
+    if cont == 'y':
+        print(yes_message)
+        return True
+    elif cont == 'n':
+        if no_message == 'raise':
+            raise RuntimeError(message)
+        else:
+            print(no_message)
+            return False
+
+#%% file IO
+
+def save_pickle(fname, yes=False, *data):
+    '''
+    save data to fname
+
+    Parameters
+    ----------
+    fname : TYPE
+        DESCRIPTION.
+    yes : bool
+        if ``True``, file will be overwritten without asking.
+    *data : TYPE
+        DESCRIPTION.
+
+    '''
+    if not '.pkl' in fname:
+        fname+='.pkl'
+    if os.path.exists(fname):
+        if os.path.isdir(fname):
+            raise ValueError('fname should be the file name, not the directory!')
+        if yes:
+            print(f'OVERWRITTEN: {fname}')
+        else:
+            pause_and_warn('File "{}" already exists!'.format(fname), choose='overwrite existing files?',
+                           default='n', yes_message='overwritten', no_message='raise')
+    with open(fname, 'wb') as f:
+        pickle.dump(data, f)
+
+def load_pickle(fname):
+    '''
+    load pkl and return. 
+    If there is only one object in the pkl, will return it.
+    Otherwise, return a tuple of the objects.
+
+    Parameters
+    ----------
+    fname : TYPE
+        DESCRIPTION.
+
+    Returns
+    -------
+    TYPE
+        DESCRIPTION.
+
+    '''
+    if fname[-4:] != '.pkl':
+        fname+='.pkl'
+    with open(fname, 'rb') as f:
+        data = pickle.load(f)
+        if len(data) == 1:
+            return data[0]
+        else:
+            return data
 

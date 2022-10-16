@@ -9,14 +9,225 @@ Main tools to store, operate and visualize data tables.
 
 import matplotlib.pyplot as plt
 import numpy as np
-from astropy.table import Table, hstack
-from astrotable.utils import objdict
+from astropy.table import Column, Table, hstack
+from astrotable.utils import objdict, save_pickle
 import warnings
+import multiprocessing as mp
+from collections.abc import Iterable
+import inspect
+from itertools import repeat, chain
 # import time
+
+subplot_arrange = {
+    1: [1, 1],
+    2: [1, 2],
+    3: [1, 3],
+    4: [2, 2]
+    }
+
+class Subset():
+    '''
+    A class to specify a row subset of an ``astrotable.table.Data`` object.
+    Although this class is independent to the ``Data`` class, it should be only used together with a ``Data`` object.
+    
+    ``Subset`` objects can be used as if they are arrays (for most cases).
+    For example, you can get the intersection set ``subset1 & subset2``,
+    the union set ``subset1 | subset2``, and the complementary set ``~subset1``.
+    '''
+    def __init__(self, selection, name=None, expression=None, label=None):
+        '''
+        Specify a subset of ``Data``.
+
+        Parameters
+        ----------
+        selection : callable (e.g. function), iterable (e.g. array-like) or string
+            If it is iterable, it should be a boolean array indicating whether each row is included in this subset.
+            It should have a shape of ``(len(data),)`` where ``data`` is an ``astrotable.table.Data`` instance.  
+        
+            If it is callable, should be defined like 
+            
+                >>> def selection(table): # input: astropy.table.Table object
+                ...     <...>
+                ...     return arr # boolean array 
+                ...                # whether each row is included in subset 
+            
+            If it is a string, should be expressions using the column names of the data, e.g.
+            ``'(column1 > 0) & (column2 < 1)'``.
+        name : str, optional
+            The name of the subset. The default is None.
+        expression : str, optional
+            The expression [e.g. '(col1 > 0) & (col2 == "A")'] used to recognize the conditions. 
+            The default is None.
+        label : str, optional
+            The label used in figures. 
+            The default is None
+            
+        Notes
+        -----
+        The inputs of ``__init__()`` will be attributes of the object.
+        By executing the ``eval_`` method, an ``astrotable.table.Data`` object ``data`` is inputted, and:
+            - The attribute ``selection`` will be converted to a boolean array;
+            - The attribute ``name`` will be set to the default name if it is None;
+            - The attribute ``expression`` will be automatically set if it is None;
+            - The attribute ``label`` will be set to ``name`` if it is None; strings will be replaced 
+              according to the mapping of dict ``data.col_labels``.
+
+        '''
+        self.selection = selection
+        self.name = name 
+        self.expression = expression
+        self.label = label
+        
+    @classmethod
+    def by_range(cls, **ranges):
+        '''
+        Initializes a subset by specifying ranges for the data.
+        
+        For example, ``Subset.by_range(col1=[0, 1], col2=[0, np.inf])`` 
+        defines a subset with `(0 < col1 < 1) & (col2 > 0)`.
+
+        Parameters
+        ----------
+        **ranges : key - value pairs:
+            key : str
+                Name of the column in the data. 
+            value : list or tuple (or other similar objects) with length=2
+                List of 2 numbers, e.g. ``[0, 1]``, specifying a range of the column.
+
+        Returns
+        -------
+        ``astrotable.table.Subset``
+
+        '''
+        # get Subset from range
+        def selection(t):
+            selected = True
+            for col, range_ in ranges.items():
+                selected &= (t[col] > range_[0]) & (t[col] < range_[1])
+            return selected # the boolean array
+        name = '&'.join([f'{col}({range_[0]}-{range_[1]})' for col, range_ in ranges.items()])
+        expression = ' & '.join([f'({col} > {range_[0]}) & ({col} < {range_[1]})' for col, range_ in ranges.items()])
+        label = ', '.join([f'{col}$\\in$({range_[0]}, {range_[1]})' for col, range_ in ranges.items()])
+       
+        return cls(selection, name=name, expression=expression, label=label)
+      
+    @classmethod
+    def by_value(cls, column, value):
+        '''
+        Initializes a subset by specifying the exact value of column.
+
+        Parameters
+        ----------
+        column : str
+            Name of the data column.
+        value : 
+            Value of the column.
+
+        Returns
+        -------
+        ``astrotable.table.Subset``
+
+        '''
+        def selection(t):
+            return t[column] == value # the boolean array
+        name = f'{column}={value}'
+        expression = name
+        label = value if type(value) in [str, np.str_] else f'{column}$=${value}'
+        return cls(selection, name=name, expression=expression, label=label)
+    
+    def eval_(self, data, existing_keys=()):
+        '''
+        Evaluate the selection array, expression, name and label, given data.
+        This method should be executed if, self.selection is not a boolean array
+        OR either self.name or self.expression is None.
+
+        Parameters
+        ----------
+        data : ``astrotable.table.Data``
+            
+        existing_keys : Iterable, optional
+            Names of subsets that already exists. 
+            This is used to generate automatic subset names.
+            The default is ().
+        '''
+        # get selection array and expression
+        if callable(self.selection):
+            if self.expression is None: 
+                self.expression = inspect.getsource(self.selection)
+            self.selection = self.selection(data.t)
+        elif isinstance(self.selection, Iterable):
+            if len(self.selection) != len(data):
+                raise ValueError(f'length of array should be {len(data)}, got {len(self.selection)}.')
+            if self.expression is None: 
+                self.expression = '<array>'
+            self.selection = np.array(self.selection).astype(bool)
+        elif type(self.selection) is str:
+            if self.expression is None: 
+                self.expression = self.selection
+            raise NotImplementedError() # TODO
+        else:
+            raise TypeError(f"keyword argument should be function, array-like object or string, got '{type(self.selection)}'.")
+
+        # get name
+        if self.name is None:
+            i = 0
+            while f'subset{i}' in existing_keys:
+                i += 1
+            self.name = f'subset{i}'
+        
+        # get label
+        if self.label is None:
+            self.label = self.name
+            
+        # replace colname with label
+        for colname, labelstr in data.col_labels.items():
+            self.label = self.label.replace(colname, labelstr)
+    
+    def __and__(self, subset): # the & (bitwise AND)
+        selection = self.selection & subset.selection
+        name = f'{self.name} & {subset.name}'
+        expression = f'({self.expression}) & ({subset.expression})'
+        if self.label != 'All' and subset.label != 'All':
+            label = f'{self.label}, {subset.label}'
+        elif self.label == 'All':
+            label = f'{subset.label}'
+        else: # subset.label == 'All'
+            label = f'{self.label}'
+        return Subset(selection, name, expression, label)
+    
+    def __or__(self, subset): # the | (bitwise OR)
+        selection = self.selection | subset.selection
+        name = f'{self.name} | {subset.name}'
+        expression = f'({self.expression}) | ({subset.expression})'
+        label = f'[{self.label}] or [{subset.label}]'
+        return Subset(selection, name, expression, label)
+    
+    def __invert__(self): # the ~ (bitwise NOT)
+        selection = ~self.selection
+        name = f'~({self.name})'
+        expression = f'~({self.expression})'
+        label = f'not [{self.label}]'
+        return Subset(selection, name, expression, label)
+    
+    def __array__(self):
+        if np.array(self.selection).dtype != bool: #not isinstance(self.selection, Iterable):
+            raise RuntimeError('Selection should be a boolean array. Maybe forgot to run eval_()?.')
+        return self.selection
+    
+    def __repr__(self):
+        # return f"Subset('{self.selection}')"
+        return f"Subset(name='{self.name}', selection={self.selection.__repr__()})"
+        
 
 class Data():
     '''
     A class to store, manipulate and visualize data tables.
+    
+    Notes
+    -----
+    - The data table of a ``Data`` instance (i.e. ``data.t``) is not expected to be changed since creation. 
+      If ``data.t`` is changed, the matching and subset information may be inconsistent with the table.
+      Create a new ``Data`` instance instead.
     '''
     def __init__(self, data, name=None, **kwargs):
         '''
@@ -34,8 +245,9 @@ class Data():
 
         '''
         if name is None:
-            warnings.warn('It is strongly suggested to input a name.')
+            warnings.warn('It is strongly recommended to input a name.')
 
+        # get data
         if type(data) is str: # got a path
             self.t = Table.read(data, **kwargs)
             self.path = data
@@ -45,16 +257,31 @@ class Data():
         else: # try to convert to data
             self.t = Table(data)
             self.path = None
-            
+         
+        # basic properties
         self.colnames = self.t.colnames
         self.name = name
         if self.name is None and self.path is not None:
             self.name = self.path.split('/')[-1].split('\\')[-1]
+        # self.id = time.time() #time.strftime('%y%m%d%H%M%S')
+        
+        # matching
         self.matchinfo = []
         self.matchnames = []
         self.matchlog = []
-        # self.id = time.time() #time.strftime('%y%m%d%H%M%S')
         
+        # subset
+        self.subset_all = Subset(np.ones(len(self)).astype(bool), name='all', expression='all', label='All') # subset named "all"
+        self.subset_groups = {
+            'default': {'all': self.subset_all}
+            }
+        self.subsets = self.subset_data # another name for subset_data
+        
+        # plot
+        self.col_labels = {} # {column_name: label_in_figures}
+        self.labels = self.col_labels # alternative name for col_labels
+        
+    #### matching & merging 
     def match(self, data1, matcher, verbose=True):
         '''
         Match this data object with another `astrotable.table.Data` object `data1`.
@@ -220,7 +447,7 @@ class Data():
                 ))
         return outinfo
     
-    def merge(self, depth=-1, keep_unmatched=[], merge_columns={}, outname=None, verbose=True):
+    def merge(self, depth=-1, keep_unmatched=[], merge_columns={}, ignore_columns={}, outname=None, verbose=True):
         '''
         Merge all data objects that are matched to this data.
         
@@ -240,11 +467,17 @@ class Data():
             A record (row) of THIS data is kept even if it cannot be matched to data in the above list.
             The default is [] (which means that only those that can be matched to each child data of this data are kept).
         merge_columns : dict, optional
-            A dict that specifies fields (columns) to be matched.
-            For example, if `data1` with name 'Data_1' is matched to this object, and you want to merge only 
-            'column1', 'column2' in `data1` into the merged catalog, use:
+            A dict that specifies fields (columns) to be merged.
+            For example, if ``data1`` with name 'Data_1' is matched to this object, and you want to merge only 
+            'column1', 'column2' in ``data1`` into the merged catalog, use:
                 {'Data_1': ['column1', 'column2']}
-            If, e.g, `merge_columns` for `data2` (with name 'Data_2') is not specified, every fields (columns) of `data2` will be merged.
+            If, e.g, ``merge_columns`` for ``data2`` (with name 'Data_2') is not specified, every fields (columns) of ``data2`` will be merged.
+            The default is {}.
+        ignore_columns : dict, optional
+            A dict that specifies fields (columns) not to be merged.
+            Similar to argument ``merge_columns``.
+            If both ``merge_columns`` and ``ignore_columns`` are specified for a field, 
+            the columns IN ``merge_columns`` AND NOT IN ``ignore_columns`` are merged.
             The default is {}.
         outname : str, optional
             The name of the merged data. 
@@ -255,8 +488,8 @@ class Data():
 
         Returns
         -------
-        matched_data : `astrotable.table.Data`
-            An `astrotable.table.Data` object containing the merged catalog.
+        matched_data : ``astrotable.table.Data``
+            An ``astrotable.table.Data`` object containing the merged catalog.
 
         '''
         if type(keep_unmatched) is str:
@@ -291,10 +524,12 @@ class Data():
             idx = matchinfo.idx
             data1_matched = matchinfo.matched
             
-            data1_table = data1.t
+            data1_table = data1.t.copy()
             
             if data1.name in merge_columns:
-                data1_table = data1_table[merge_columns[data1.name]]
+                data1_table.keep_columns(merge_columns[data1.name])
+            if data1.name in ignore_columns:
+                data1_table.remove_columns(ignore_columns[data1.name])
             
             if data1.name in keep_unmatched: # keep unmatched
                 if verbose: print(f'entries with no match for {data1.name} is kept.')
@@ -325,13 +560,13 @@ class Data():
         
         return matched_data
     
-    def match_merge(self, data1, matcher, keep_unmatched=[], merge_columns={}, outname=None, verbose=True):
+    def match_merge(self, data1, matcher, keep_unmatched=[], merge_columns={}, ignore_columns={}, outname=None, verbose=True):
         '''
-        Match this data with `data1` and immediately merge everything that can be matched to this data.
-        See `help(astrotable.table.Data.match)` and `help(astrotable.table.Data.merge)` for more information.
+        Match this data with ``data1`` and immediately merge everything that can be matched to this data.
+        See ``help(astrotable.table.Data.match)`` and ``help(astrotable.table.Data.merge)`` for more information.
         '''
         self.match(data1=data1, matcher=matcher, verbose=verbose)
-        return self.merge(keep_unmatched=keep_unmatched, merge_columns=merge_columns, outname=outname, verbose=verbose)
+        return self.merge(keep_unmatched=keep_unmatched, merge_columns=merge_columns, ignore_columns=ignore_columns, outname=outname, verbose=verbose)
     
     def _match_tree(self, depth=-1, detail=True, matched_names=[], matched_ids=[], indent='', matcher='base'):
         # copy lists to avoid modifying it in-place (which will cause the method to "remember" them!)
@@ -381,14 +616,672 @@ class Data():
         self._match_tree(depth=depth, detail=detail)
         print('---------------')
     
-    def save(self, path):
-        pass
+    #### operation
+    def apply(self, func, processes=None, args=(), **kwargs):
+        '''
+        Apply function ``func`` to each row of the Table (``data.t``) to get a new column.
+        This operation is not vectorized.
+
+        Parameters
+        ----------
+        func : function
+            A function to be applied to each row. Example::
+            
+                >>> def func(row): # row is a row of the Table.
+                ...     return row['a'] + row['b']
+            
+            Note that if processes is not None, func should be a global function 
+            and should not be a lambda function and only accepts one single argument ``row``.
+        processes : None or int
+            if int (>0) is given, this specifies the number of processes used to get the results.
+            if -1 is given, will automatically use all available cpu cores.
+            if None, multiprocess will not be used.
+        args : Iterable, optional
+            Additional arguments to be passed to func. The default is ().
+        **kwargs :
+            Additional keyword arguments to be passed to func.
+
+        Returns
+        -------
+        ``astropy.table.Column``
+            Result of applying ``func`` to each row.
+
+        '''
+        if processes is None:
+            result = []
+            for row in self.t:
+                result.append(func(row, *args, **kwargs))
+        elif type(processes) is int:
+            if processes == -1:
+                processes = None
+            pool = mp.Pool(processes)
+            result = pool.map(func, self.t)
+        else:
+            raise TypeError('"processes" should be None or int.')
+        return Column(result)
+    
+    #### subsets
+    
+    def add_subsets(self, *subsets, group=None):
+        '''
+        Add subsets to a subset group.
+        
+        A subset refers to a subset (selection) of rows;
+        a subset group is a group of subsets.
+
+        Parameters
+        ----------
+        group : str, optional
+            The name of the subset group. If not specified, the default subset group will be used.
+        *subsets : ``astrotable.table.Subset``
+            See ``help(astrotable.table.Subset)`` for more information.
+            
+        '''
+        if group is None:
+            group = 'default'
+        elif group not in self.subset_groups.keys():
+            self.subset_groups[group] = {}
+        for subset in subsets:
+            subset.eval_(self, self.subset_groups[group].keys())
+            name = subset.name
+            self.subset_groups[group][name] = subset
+    
+    def subset_group_from_values(self, column, group_name=None, overwrite=False):
+        '''
+        Create a subset group by the unique values of a column.
+        
+        For example, if a column named "class" has 3 possible values, "A", "B" and "C",
+        a subset group will be defined with 3 subsets for class=A, B, C, respectively.
+
+        Parameters
+        ----------
+        column : str
+            The name of the column.
+        group_name : str, optional
+            The name of the created subset group. 
+            The default is the name of the column.
+        overwrite : bool, optional
+            When a group with ``group_name`` already exists, whether to overwrite the group. 
+            The default is False.
+
+        Raises
+        ------
+        ValueError
+            A group with ``group_name`` already exists, and ``overwrite`` set to ``False``.
+        '''
+        if group_name is None:
+            group_name = column
+        
+        if group_name in self.subset_groups and not overwrite:
+            raise ValueError(f'A subset group with name "{group_name}" already exists.')
+        
+        values = np.unique(self.t[column])
+        if len(values) > 10:
+            warnings.warn(f'A total of {len(values)} unique values found in column "{column}". This will result in a subset group with a lot of subsets.')
+        
+        self.subset_groups[group_name] = {}
+        for value in values:
+            subset = Subset.by_value(column, value)
+            subset.eval_(self)
+            name = subset.name
+            self.subset_groups[group_name][name] = subset
+    
+    def subset_group_from_ranges(self, column, ranges, group_name=None, overwrite=False):
+        '''
+        Create a subset group by setting several ranges of values of a column.
+        
+        For example, ``data.subset_group_from_ranges(column='col1', ranges=[[0, 1], [1, 2]])``
+        defines a subset group named 'col1', which consists of 2 subsets, `0<col1<1` and `1<col1<2`.
+
+        Parameters
+        ----------
+        column : str
+            The name of the column.
+        ranges : list of lists (or similar objects)
+            List of ranges.
+        group_name : str, optional
+            The name of the created subset group. 
+            The default is the name of the column.
+        overwrite : bool, optional
+            When a group with ``group_name`` already exists, whether to overwrite the group. 
+            The default is False.
+
+        Raises
+        ------
+        ValueError
+            A group with ``group_name`` already exists, and ``overwrite`` set to ``False``.
+        '''
+        if group_name is None:
+            group_name = column
+        
+        if group_name in self.subset_groups and not overwrite:
+            raise ValueError(f'A subset group with name "{group_name}" already exists.')
+        
+        self.subset_groups[group_name] = {}
+        for range_ in ranges:
+            subset = Subset.by_range(**{column: range_})
+            subset.eval_(self)
+            name = subset.name
+            self.subset_groups[group_name][name] = subset
+    
+    def clear_subsets(self, group=None):
+        '''
+        Clear user-defined subsets.
+
+        Parameters
+        ----------
+        group : str, optional
+            Name of the subset group to be cleared. 
+            If not specified, all user-defined subsets are deleted.
+        '''
+        if group in (None, 'all'):
+            # print('INFO: subsets reset to default.')
+            self.subset_groups = {
+                'default': {'all': self.subset_all}
+                }
+        elif group in ('default',):
+            self.subset_groups['default'] = {'all': self.subset_all}
+        else:
+            del self.subset_groups[group]
+    
+    def get_subsets(self, path=None, name=None, group=None, listalways=False):
+        '''
+        Get a subset (or several subsets) given the subset groups, subset names 
+        or paths (i.e. ``'<group_name>/<subset_name>'``)
+        Different from the ``subset_data`` method, which returns the ``Subset`` objects.
+
+        Parameters
+        ----------
+        path : str or list of str, optional
+            The path or a list of paths.
+            If this is given, arguments ``name`` and ``group`` are ignored.
+            The default is None.
+        name : str or list of str, optional
+            The names of subsets, or a list of names. 
+            The default is all subsets in the specified group.
+        group : str, optional
+            The name of the group. The default is the default group.
+        listalways : bool, optional
+            If True, always returns list of subsets (even if len(list) == 1).
+            The default is False.
+
+        Returns
+        -------
+        ``astrotable.table.Subset`` or list of ``astrotable.table.Subset``
+            The subset or list of subsets specified.
+            
+        Examples
+        --------
+        
+
+        '''
+        if path is not None:
+            if type(path) is str:
+                if listalways:
+                    path = [path]
+                else:
+                    return self._get_subset_from_path(path)
+            if isinstance(path, Iterable):
+                subsets = []
+                for p in path:
+                    subsets.append(self._get_subset_from_path(p))
+                return subsets
+            else:
+                raise TypeError('path should be str or Iterable')
+        else:
+            if group is None:
+                group = 'default'
+            if type(group) is not str:
+                raise TypeError('group should be a string')
+                
+            if name is None:
+                name = self.subset_groups[group].keys()
+            if type(name) is str:
+                if listalways:
+                    name = [name]
+                else:
+                    return self._get_subset_from_path(f'{group}/{name}')
+            if isinstance(name, Iterable):
+                subsets = []
+                for n in name:
+                    subsets.append(self._get_subset_from_path(f'{group}/{n}'))
+                return subsets
+            else:
+                raise TypeError('name should be str or Iterable')
+                
+    def _get_subset_from_path(self, path):
+        # get the subset DATA from path
+        if '/' not in path:
+            group = 'default'
+            name = path
+        else:
+            group, name = path.split('/')
+        subset = self.subset_groups[group][name]
+        return subset
+    
+    def _data_from_subset(self, subsets):
+        '''
+        Returns the sub-dataset from ``Subset`` objects
+
+        Parameters
+        ----------
+        subsets : ``Subset`` or list of ``Subset``
+
+        Returns
+        -------
+        ``Data``
+
+        '''
+        if not isinstance(subsets, Iterable):
+            subset = subsets
+            table_subset = self.t[np.array(subset)]
+            return Data(table_subset, name=f'{self.name}_{subset.name}')
+        else:
+            subset_data = []
+            for subset in subsets:
+                table_subset = self.t[np.array(subset)]
+                subset_data.append(Data(table_subset, name=f'{self.name}_{subset.name}'))
+            return subset_data
+        
+
+    def subset_data(self, path=None, name=None, group=None):
+        '''
+        Get a subset (or several subsets) of data given the subset groups, subset names 
+        or paths (i.e. ``'<group_name>/<subset_name>'``)
+        Different from the ``get_subsets`` method, which returns the ``Subset`` objects.
+
+        Parameters
+        ----------
+        path : str or list of str, optional
+            The path or a list of paths.
+            If this is given, arguments ``name`` and ``group`` are ignored.
+            The default is None.
+        name : str or list of str, optional
+            The names of subsets, or a list of names. 
+            The default is all subsets in the specified group.
+        group : str, optional
+            The name of the group. The default is the default group.
+
+
+        Returns
+        -------
+        ``astrotable.table.Data`` or list of ``astrotable.table.Data``
+            The subset of data or list of subsets of data specified.
+            
+        Examples
+        --------
+        
+
+        '''
+        subsets = self.get_subsets(path=path, name=name, group=group)
+        return self._data_from_subset(subsets)
+    
+    def subset_summary(self, group=None):
+        '''
+        Get a summary table for the subsets and subset groups.
+        
+        The table consists of the following columns:
+            - `group`: name of the subset group
+            - `name`: name of the subset
+            - `size`: size of the subset
+            - `fraction`: fracion of the size to the total number
+            - `expression`: expression/source code that specifies the selection of the subset
+            - `label`: label of the subset used for plotting
+
+        Parameters
+        ----------
+        group : str or list of str, optional
+            The name (or list of names) of the subset group(s) to be shown in the table. 
+            If not given, all groups will be shown by default.
+
+        Returns
+        -------
+        summary : ``astropy.table.Table``
+        '''
+        summary = Table(names=['group', 'name', 'size', 'fraction', 'expression', 'label'], 
+                        dtype=['str', 'str', 'int', 'float', 'str', 'str']
+                        )
+        if group is None:
+            group = self.subset_groups.keys()
+        elif type(group) is str:
+            group = [group]
+        shown_groups = {k: self.subset_groups[k] for k in group}
+        for groupname, subsets in shown_groups.items():
+            for subsetname, subset in subsets.items():
+                n_selected = np.sum(subset.selection)
+                summary.add_row(dict(
+                    group=groupname, name=subsetname,
+                    size=n_selected, fraction=n_selected/len(subset.selection),
+                    expression=subset.expression,
+                    label=subset.label,
+                    ))
+        return summary
+    
+    #### plot
+    
+    def set_labels(self, **kwargs):
+        '''
+        label(<column_name>=<label>)
+        
+        Add/update the labels used for, e.g., the labels on the axes of the plots.
+        
+        Example: if ``col1='$x_1$'``, the data in ``data.t['col1']`` will be labeled as '$x_1$' on the plots.
+
+        Parameters
+        ----------
+        **kwargs : <column_name:str>=<label:str>
+        '''
+        self.col_labels.update(**kwargs)
+    
+    # def get_labels(self):
+    #     '''
+    #     Get the labels set by ``set_labels``.
+
+    #     Returns
+    #     -------
+    #     dict
+    #     '''
+    #     return self.col_labels
+    
+    # @property
+    # def labels(self):
+    #     return self.get_labels()
+    
+    def plot(self, func, *args, columns=None, kwarg_columns={}, paths=None, subsets=None, groups=None, autolabel=True, ax=None, global_selection=None, iter_kwargs={}, **kwargs):
+        '''
+        Make a plot given a plotting function.
+        
+        Arguments ``paths``, ``subsets``, ``groups`` are used to specify the subsets of data 
+        that are plotted in the same subplot.
+
+        Parameters
+        ----------
+        func : function
+            Function to make plots, e.g. ``plt.plot``.
+        *args : 
+            Arguments to be passed to func.
+        columns : str or list of str, optional
+            The name of the columns to be passed to ``func``. 
+            For example, if ``columns = ['col1', 'col2']``, ``func`` will be called by:
+                ``func(data.t['col1'], data.t['col2'], *args)``
+            `Note`: When ``autolabel`` is True, the len of this argument is used to guess the dimension of the plot (e.g. 2D/3D).
+            The default is None.
+        kwarg_columns : dict, optional
+            Names of data columns that are passed to ``func`` as keyword arguments.
+            For example, if ``kwargs_columns={'x': 'col1', 'y':'col2'}``, ``func`` will be called by:
+                ``func(x=data.t['col1'], y=data.t['col2'])``
+        paths : str or list of str, optional
+            The full path of a subset (e.g. ``'<group_name>/<subset_name>'``) or a list of paths.
+            If this is given, arguments ``subsets`` and ``group`` are ignored.
+            The default is None.
+        subsets : str or list of str, optional
+            The names of subsets, or a list of names. 
+            The default is all subsets in the specified group.
+        groups : str, optional
+            The name of the group. The default is the default group.
+        autolabel : bool, optional
+            If True, will try to automatically add labels to the plot (made by ``func``) as well as the axes,
+            using the labels stored in Data and Subset objects.
+            
+            NOTE: The labels for axes are auto-set according to the argument ``columns``, 
+            and may not get the results you expects.
+            Label for axes and legends are only possible for axes if argument ``ax`` is given.
+            
+            The default is True.
+        ax : axes, optional
+            The axis of the plot. 
+            Note that this is ONLY used for adding axis labels and legends; 
+            if you would like to plot on a specific axis, consider passing e.g. ``ax.plot`` to argument ``func``.
+            The default is None.
+        global_selection : ``astrodata.table.Subset``, optional
+            The global selection for this plot. 
+            If not None, only data selected by this argument is plotted.
+            The default is None.
+        iter_kwargs : dict, optional
+            Lists of keywoard arguments that are different for each subset specified. 
+            Suppose 3 subsets are specified using the ``subsets`` argument, an example value for 
+            ``iter_kwargs`` is :
+                ``{'color': ['b', 'r', 'k'], 'linestyle': ['-', '--', '-.']}``
+            The default is {}.
+        **kwargs : 
+            Additional keyword arguments to be passed to ``func``.
+
+        Raises
+        ------
+        ValueError
+            len of one item of iter_kwargs is not equal to 
+            the len of paths/subsets
+
+        Examples
+        --------
+        One simplest example:
+            
+        >>> from astrotable.table import Data
+        >>> data = Data({'col1': [1, 2, 3], 'col2': [1, 4, 9]})
+        >>> fig, ax = plt.subplots()
+        >>> data.plot(ax.plot, ax=ax, columns=('col1', 'col2'), color='k')
+        '''
+        iter_kwargs = iter_kwargs.copy()
+        kwarg_columns = kwarg_columns.copy()
+        
+        subset_names = subsets
+        subsets = self.get_subsets(path=paths, name=subset_names, group=groups)
+        if type(subsets) is Subset:
+            subsets = [subsets]
+        
+        if global_selection is not None:
+            subsets = [(subset & global_selection) for subset in subsets]
+            
+        subset_data_list = self._data_from_subset(subsets)
+        # subset_data_list = self.subset_data(path=paths, name=subset_names, group=groups)
+        # if type(subset_data_list) is Data:
+        #     subset_data_list = [subset_data_list]
+        
+        # try to automatically set label
+        if autolabel:
+            if 'label' not in iter_kwargs: # label for single plot element
+                iter_kwargs['label'] = [subset.label for subset in subsets]
+            if ax is not None:
+                ax.set(**dict(zip(
+                    ['xlabel', 'ylabel', 'zlabel'], 
+                    [self.col_labels[col] if col in self.col_labels else col for col in columns]
+                    )))
+        
+        if iter_kwargs != {}:
+            # check values
+            for key, values in iter_kwargs.items():
+                if not isinstance(values, Iterable):
+                    values = [values]
+                if len(values) != len(subset_data_list):
+                    raise ValueError(f"len of iter_kwargs '{key}' should be {len(subset_data_list)}, got {len(values)}")
+            # get kwargs for each subset
+            iter_kwargs_list = [dict(zip(iter_kwargs.keys(), value)) for value in zip(*(iter_kwargs[i] for i in iter_kwargs))]
+        else:
+            iter_kwargs_list = repeat({})
+        
+        for subset_data, iter_kwargs in zip(subset_data_list, iter_kwargs_list):
+            if columns is None:
+                input_data = () # input data for the func (as *args)
+            else:
+                if type(columns) is str:
+                    columns = [columns]
+                input_data = []
+                for column in columns:
+                    input_data.append(subset_data.t[column])
+            for argname in kwarg_columns:
+                kwarg_columns[argname] = subset_data.t[kwarg_columns[argname]]
+            
+            func(*input_data, *args, **kwarg_columns, **iter_kwargs, **kwargs)
+            
+        if autolabel and ax is not None:
+            if len(subset_data_list) > 1:
+                ax.legend()
+            else:
+                ax.set_title(subsets[0].label)
+    
+    def subplot_array(self, func, *args, columns=None, kwarg_columns={}, plotgroups=None, arraygroups=None, global_selection=None, share_ax=False, autobreak=False, autolabel=True, ax_callback=None, axes=None, fig=None, iter_kwargs={}, **kwargs):
+        '''
+        Plot an "array" of subplots (panels; subplots with several rows and columns) for different selections given in ``arraygroups``;
+        Each of the panels consists of several plots for different selections given in ``plotgroups``.
+        
+        This is useful if one wishes to compare a plot for different subsets of the data. 
+        For example, say ``plotgroups='group1'``, ``arraygroups=['group2', 'group3']``.
+        Then each panel compares different subsets in ``'group1'``; different panels compares the results 
+        between subsets in ``'group2'`` and ``'group3'``.
+        Note that the dataset for each plot in each panel is the INTERSECTION of the corresponding subsets in 
+        ``'group1'``, ``'group2'`` and ``'group3'``.
+
+        Parameters
+        ----------
+        func : function
+            Function that receives an axis as the only argument, 
+            and returns a function (called "plotting function" hereafter) to make plots.
+            Example:``lambda ax: ax.plot``.
+        *args : 
+            Arguments to be passed to the plotting function.
+        columns : str or list of str, optional
+            The name of the columns to be passed to the plotting function. 
+            For example, if ``columns = ['col1', 'col2']``, the plotting function will be called by:
+                ``plotting_function(data.t['col1'], data.t['col2'], *args)``
+            `Note`: When ``autolabel`` is True, the len of this argument is used to guess the dimension of the plot (e.g. 2D/3D).
+            The default is None.
+        kwarg_columns : dict, optional
+            Names of data columns that are passed to the plotting function as keyword arguments.
+            For example, if ``kwargs_columns={'x': 'col1', 'y':'col2'}``, the plotting function will be called by:
+                ``plotting_function(x=data.t['col1'], y=data.t['col2'])``
+        plotgroups : str, optional
+            The name of the subset group used to make different plots in each one of the panels. 
+            For example, when the plotting function plots curves and ``plotgroups`` consists of 
+            3 subsets, 3 curves for the 3 subsets are plotted in each of the panels.
+            The default is None.
+        arraygroups : str or iterable of len <= 2, optional
+            The name of subset groups used to make different panels. 
+            Examples:
+                - ``arraygroups = ['group1']``, where `'group1'` consists of 3 subsets. 
+                  Then subplots with ``nrow=1, ncol=3`` (1x3) are generated.
+                - ``arraygroups = ['group1', 'group2']``, where `'group1', 'group2'` consists of 3, 4 subsets respectively. 
+                  Then subplots with ``nrow=3, ncol=4`` (3x4) are generated.
+            The default is None.
+        global_selection : ``astrotable.table.Subset``, optional
+            Only consider data in subset ``global_selection``.
+            The default is None (the whole dataset is considered).
+        share_ax : bool, optional
+            Whether the x, y axes are shared. The default is False.
+        autobreak : bool, optional
+            When ``arraygroups`` consists of only one group, whether to automatically break the row
+            into several rows (since the default result is a group of subplots with only one row). 
+            The default is False.
+        autolabel : bool, optional
+            If True, will try to automatically add labels to the plot (made by ``func``) as well as the axes,
+            using the labels stored in Data and Subset objects.
+            
+            NOTE: The labels for axes are auto-set according to the argument ``columns``, 
+            and may not get the results you expects.
+            Label for axes and legends are only possible for axes if argument ``ax`` is given.
+            
+            The default is True.
+        ax_callback : function, optional
+            The function to be called as ``ax_callback(ax)`` after plotting in each panel,
+            where ``ax`` is the axis object of this panel.
+        axes : list of axes, optional
+            The axes of the subplots. 
+            The default is None.
+        fig : ``matplotlib.figure.Figure``, optional
+            The figure on which the subplots are made. 
+            The default is None.
+        iter_kwargs : dict, optional
+            Lists of keywoard arguments that are different for each subset in ``plotgroups``. 
+            Suppose ``plotgroups='group1'`` consists of 3 subsets, an example value for 
+            ``iter_kwargs`` is :
+                ``{'color': ['b', 'r', 'k'], 'linestyle': ['-', '--', '-.']}``
+            The default is {}.
+        **kwargs : 
+            Additional keyword arguments to be passed to the plotting function.
+
+        Raises
+        ------
+        ValueError
+            - len(plotgroups) >=3: plot array of dim >= 3 not supported.
+            - inferred ``nrow*ncol`` != ``len(axes)`` given
+
+        Returns
+        -------
+        fig : ``matplotlib.figure.Figure``
+        axes : list if axes
+
+        '''
+        # TODO (not implemented)
+        if share_ax: raise NotImplementedError('This feature is not implemented, and whether it will be added is undetermined.')
+        
+        iter_kwargs = iter_kwargs.copy()
+        kwarg_columns = kwarg_columns.copy()
+
+        if arraygroups is None:
+            if isinstance(axes, Iterable):
+                axes = axes[0]
+            return self.plot(func, *args, columns=columns, paths=None, subsets=None, groups=plotgroups, autolabel=autolabel, ax=axes, iter_kwargs=iter_kwargs, **kwargs)
+
+        # get subsets for each panel
+        if type(arraygroups) is str:
+            arraygroups = [arraygroups]
+        subsets = [self.get_subsets(group=group, listalways=True) for group in arraygroups]
+        if global_selection is not None:
+            subsets = [[subset & global_selection for subset in subseti] for subseti in subsets]
+        if len(subsets) >= 3:
+            raise ValueError('len(plotgroups) >=3: plot array of dim >= 3 not supported. ')
+        elif len(subsets) == 2:
+            subset_array = [[(xi & yi) for xi in subsets[0]] for yi in subsets[1]]
+        else: # len(subsets) == 1
+            subset_array = subsets
+            
+        # decide nrow and ncol and check inputs
+        if autobreak: # autobreak is not a comprehensive function
+            if len(subsets) in subplot_arrange:
+                nrow, ncol = subplot_arrange[len(subsets)]
+            else:
+                pass # TODO: not implemented
+        else:
+            nrow, ncol = len(subset_array), len(subset_array[0])
+        figsize = [6.4*(1+.7*(ncol-1)), 4.8*(1+.7*(nrow-1))]
+        
+        # prepare and check consistency with axes
+        if axes is None:
+            if fig is None:
+                fig = plt.figure(figsize=figsize)
+            axes = fig.subplots(nrow, ncol)
+        elif not isinstance(axes, Iterable):
+                axes = [axes]
+        axes_flat = np.array(axes).flatten()
+        if len(axes_flat) != nrow*ncol:
+            raise ValueError(f'Expected {nrow}*{ncol}={nrow*ncol} axes; got {len(axes)}.')
+        
+        # plot subplots
+        for ax, subset in zip(axes_flat, chain(*subset_array)):
+            self.plot(func(ax), *args, columns=columns, kwarg_columns=kwarg_columns, groups=plotgroups, autolabel=True, ax=ax, global_selection=subset, iter_kwargs=iter_kwargs, **kwargs)
+            if ax_callback is not None:
+                ax_callback(ax)
+        
+        return fig, axes
+    
+    #### IO
+    
+    def save(self, path, format='pkl', overwrite=False):
+        if format == 'pkl':
+            save_pickle(path, overwrite, self)
+        else:
+            self.t.write(path, format=format, overwrite=overwrite)
+    
+    #### basic methods
     
     def __len__(self):
         return len(self.t)
     
     def __getitem__(self, item):
-        # return Data(self.t[item])
         warnings.warn('Although supported, it is not suggested to access table by directly subscripting Data objects. Use e.g. data.t[index] instead of data[index].')
         return (self.t[item])
+        # return Data(self.t[item])
+    
+    def __setitem__(self, item, value):
+        warnings.warn('Although supported, it is not suggested to set items of the table by directly subscripting Data objects. Use e.g. data.t[index] instead of data[index].')
+        self.t[item] = value
 

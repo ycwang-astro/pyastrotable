@@ -119,6 +119,9 @@ class SkyMatcher():
             elif type(coordi) is SkyCoord:
                 self.ra_name, self.dec_name = None, None
                 coords.append(coordi)
+            
+            else:
+                raise TypeError(f"Unsupported type for coord/coord1: '{type(coordi)}'")
         
         self.coord, self.coord1 = coords
         
@@ -126,6 +129,33 @@ class SkyMatcher():
         idx, d2d, d3d = self.coord.match_to_catalog_sky(self.coord1)
         matched = d2d.arcsec < self.thres
         return idx, matched
+    
+    def explore(self, data, data1):
+        '''
+        Plot as simple histogram to 
+        check the distribution of the minimum (2-d) sky separation.
+
+        Parameters
+        ----------
+        data : ``astrotable.table.Data``
+            The base data of the match.
+        data1 : ``astrotable.table.Data``
+            The data to be matched to ``data1``.
+
+        Returns
+        -------
+        None.
+
+        '''
+        self.get_values(data, data1)
+        idx, d2d, d3d = self.coord.match_to_catalog_sky(self.coord1)
+        import matplotlib.pyplot as plt
+        plt.figure()
+        plt.hist(np.log10(d2d.arcsec), bins=min((200, len(data)//20)), histtype='step', linewidth=1.5, log=True)
+        plt.axvline(np.log10(self.thres), color='r', linestyle='--')
+        plt.xlabel('lg (d / arcsec)')
+        plt.title(f"Min. distance to '{data1.name}' objects for each '{data.name}' object\nthreshold={self.thres}\"")
+        
         
     def __repr__(self):
         return f'SkyMatcher with thres={self.thres}'

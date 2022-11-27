@@ -10,12 +10,13 @@ Main tools to store, operate and visualize data tables.
 import matplotlib.pyplot as plt
 import numpy as np
 from astropy.table import Column, Table, hstack
-from astrotable.utils import objdict, save_pickle
+from astrotable.utils import objdict, save_pickle, deprecated_keyword_alias
 import warnings
 import multiprocessing as mp
 from collections.abc import Iterable
 import inspect
 from itertools import repeat, chain
+# import re
 # import time
 
 subplot_arrange = {
@@ -25,14 +26,57 @@ subplot_arrange = {
     4: [2, 2]
     }
 
+plot_funcs = {
+    'plot': plt.plot,
+    'scatter': plt.scatter,
+    'hist': plt.hist,
+    'hist2d': plt.hist2d,
+    'errorbar': plt.errorbar,
+    }
+
+plot_array_funcs = {
+    'plot': lambda ax: ax.plot,
+    'scatter': lambda ax: ax.scatter,
+    'hist': lambda ax: ax.hist,
+    'hist2d': lambda ax: ax.hist2d,
+    'errorbar': lambda ax: ax.errorbar,
+    }
+
 class Subset():
     '''
     A class to specify a row subset of an ``astrotable.table.Data`` object.
     Although this class is independent to the ``Data`` class, it should be only used together with a ``Data`` object.
     
+    To specify the selection criteria, name, etc. of a subset, the general way is::
+
+        Subset(<selection>, name=<name>, <...>)
+
+    Convenient methods for specifying a subset are::
+
+        Subset.by_range(<column name>=<value range>, <...>)
+        Subset.by_value(<column name>, <value>)
+
+    See ``help(Subset.__init__)``, ``help(Subset.by_range)`` and ``help(Subset.by_value)`` for more information.
+    
+    In practice, a subset of ``data`` is usually defined as:
+        
+        >>> subset = data.add_subsets(Subset(<...>))
+    
+    You may also define multiple subsets at a time:
+        
+        >>> subset1, subset2 = data.add_subsets(
+        ...     Subset(<...>),
+        ...     Subset(<...>))
+    
     ``Subset`` objects can be used as if they are arrays (for most cases).
     For example, you can get the intersection set ``subset1 & subset2``,
     the union set ``subset1 | subset2``, and the complementary set ``~subset1``.
+    
+    Notes for developers
+    --------------------
+    Currently, the '&', '|', '~' operations can only be performed if selection is an boolean array,
+    or ``Subset.eval_`` is called. (This is always called when a subset is defined in ``data.add_subsets()``.)
+    Operation before evalutaion may be supported in the future.
     '''
     def __init__(self, selection, name=None, expression=None, label=None):
         '''
@@ -155,16 +199,39 @@ class Subset():
             if self.expression is None: 
                 self.expression = inspect.getsource(self.selection)
             self.selection = self.selection(data.t)
+        elif type(self.selection) is str:
+            if self.expression is None: 
+                self.expression = self.selection
+            
+            if self.selection in ['all', 'All']:
+                self.selection = np.full(len(data), True)
+            
+            else:
+                # check string: avoid error if the string contains something like "self", "data" but are not real column names
+                for name in chain(locals(), globals()):
+                    if name in ['np']:
+                        continue
+                    if name in self.selection and name not in data.colnames:
+                        raise KeyError(name)
+                
+                for colname in data.colnames: # replace colnames to expression
+                    self.selection = self.selection.replace(colname, f"data.t['{colname}']")
+                
+                try:
+                    print('Subset: evaluating', self.selection)
+                    self.selection = eval(self.selection)
+                except NameError as e:
+                    raise KeyError(e.name)
+                except:
+                    raise
+                
         elif isinstance(self.selection, Iterable):
             if len(self.selection) != len(data):
                 raise ValueError(f'length of array should be {len(data)}, got {len(self.selection)}.')
             if self.expression is None: 
                 self.expression = '<array>'
             self.selection = np.array(self.selection).astype(bool)
-        elif type(self.selection) is str:
-            if self.expression is None: 
-                self.expression = self.selection
-            raise NotImplementedError() # TODO
+
         else:
             raise TypeError(f"keyword argument should be function, array-like object or string, got '{type(self.selection)}'.")
 
@@ -282,7 +349,7 @@ class Data():
         self.labels = self.col_labels # alternative name for col_labels
         
     #### matching & merging 
-    def match(self, data1, matcher, verbose=True):
+    def match(self, data1, matcher, verbose=True, replace=False):
         '''
         Match this data object with another `astrotable.table.Data` object `data1`.
 
@@ -296,35 +363,50 @@ class Data():
             See e.g. `help(astrotable.matcher.SkyMatcher)` for more information.
             
             A matcher object should be defined like below:
-                ```
-                class MyMatcher():
-                    def __init__(self, args): # 'args' means any number of arguments that you need
-                        # initialize it with args you need
-                        pass
-                    
-                    def get_values(self, data, data1, verbose=True): # data1 is matched to data
-                        # prepare the data that is needed to do the matching (if necessary)
-                        pass
-                    
-                    def match(self):
-                        # do the matching process and calculate:
-                        # idx : array of shape (len(data), ). 
-                        #     the index of a record in data1 that best matches the records in data
-                        # matched : boolean array of shape (len(data), ).
-                        #     whether the records in data can be matched to those in data1.
-                        return idx, matched
-                ```
+                
+                >>> class MyMatcher():
+                ...     def __init__(self, args): # 'args' means any number of arguments that you need
+                ...         # initialize it with args you need
+                ...         pass
+                ...     
+                ...     def get_values(self, data, data1, verbose=True): # data1 is matched to data
+                ...         # prepare the data that is needed to do the matching (if necessary)
+                ...         pass
+                ...     
+                ...     def match(self):
+                ...         # do the matching process and calculate:
+                ...         # idx : array of shape (len(data), ). 
+                ...         #     the index of a record in data1 that best matches the records in data
+                ...         # matched : boolean array of shape (len(data), ).
+                ...         #     whether the records in data can be matched to those in data1.
+                ...         return idx, matched
         verbose : bool, optional
             Whether to output matching information. The default is True.
+        replace : bool, optional
+            When ``data1`` (Data to be matched) has the same name as a Data object that has already been matched to this Data,
+            whether to replace the old matching.
+            If False, a ValueError is raised.
+            The default is False.
 
         Raises
         ------
         ValueError
-            - Data with the same name is not allowed to be matched to this Data twise.
-
+            - Data with the same name to be matched to this Data twise.
+        
+        Returns
+        -------
+        
+        
         '''
+        if not (isinstance(data1, Data) or type(data1) == type(self)):
+            raise TypeError(f"only supports matching 'astrotable.table.Data' type; got {type(data1)}")
+        
         if data1.name in self.matchnames:
-            raise ValueError(f"Data with name '{data1.name}' has already been matched. This may result from name duplicates or re-matching the same catalog.")
+            if replace:
+                self.unmatch(data1)
+            else:
+                raise ValueError(f"Data with name '{data1.name}' has already been matched. This may result from name duplicates or re-matching the same catalog. \
+                                 Set 'replace=True' to replace the existing match with '{data1.name}'.")
         
         matcher.get_values(self, data1, verbose=verbose)
         idx, matched = matcher.match()
@@ -342,6 +424,41 @@ class Data():
         if verbose: print(matchstr)
         
         return self
+    
+    def unmatch(self, data1, verbose=True):
+        '''
+        Remove match to ``data1``.
+
+        Parameters
+        ----------
+        data1 : ``astrotable.table.Data`` or str
+            The Data or the name of the Data.
+        verbose : bool, optional
+            Whether to output information. The default is True.
+
+        Returns
+        -------
+        None.
+
+        '''
+        # warnings.warn('Data.unmatch method not tested')
+        if (isinstance(data1, Data) or type(data1) == type(self)):
+            name1 = data1.name
+        elif type(data1) is str:
+            name1 = data1
+        else:
+            raise TypeError(f"only supports 'astrotable.table.Data' or str; got {type(data1)}")
+        
+        if name1 not in self.matchnames:
+            warnings.warn(f"Data with name '{data1.name}' has never been matched. Nothing is done.")
+            return
+        
+        self.matchinfo = [info for info in self.matchinfo if info.data1.name != name1]
+        self.matchnames.remove(name1)
+        
+        unmatchstr = f'"{name1}" unmatched to "{self.name}".'
+        if verbose: print(unmatchstr)
+        self.matchlog.append(unmatchstr)
     
     def reset_match(self):
         '''
@@ -675,16 +792,28 @@ class Data():
             The name of the subset group. If not specified, the default subset group will be used.
         *subsets : ``astrotable.table.Subset``
             See ``help(astrotable.table.Subset)`` for more information.
+        
+        Return
+        ------
+        subsets : tuple
+            The arguments, i.e. a tuple of subset objects.
             
         '''
         if group is None:
             group = 'default'
         elif group not in self.subset_groups.keys():
             self.subset_groups[group] = {}
+        # subset_objects = []
         for subset in subsets:
             subset.eval_(self, self.subset_groups[group].keys())
             name = subset.name
             self.subset_groups[group][name] = subset
+            # subset_objects.append(subset)
+        # return subset_objects
+        if len(subsets) == 1:
+            return subsets[0]
+        else:
+            return subsets
     
     def subset_group_from_values(self, column, group_name=None, overwrite=False):
         '''
@@ -781,8 +910,10 @@ class Data():
                 }
         elif group in ('default',):
             self.subset_groups['default'] = {'all': self.subset_all}
-        else:
+        elif group in self.subset_groups.keys():
             del self.subset_groups[group]
+        else:
+            warnings.warn(f"group name '{group}' does not exist, no need to clear")
     
     def get_subsets(self, path=None, name=None, group=None, listalways=False):
         '''
@@ -987,7 +1118,10 @@ class Data():
     # def labels(self):
     #     return self.get_labels()
     
-    def plot(self, func, *args, columns=None, kwarg_columns={}, paths=None, subsets=None, groups=None, autolabel=True, ax=None, global_selection=None, iter_kwargs={}, **kwargs):
+    # TODO. argument col_input: plan: make it possible to input something like 'col1', 'col2', c='col3',
+    # and translate it to make it the same as columns=('col1', 'col2'), kwarg_columns={'c': 'col3'}.
+    @deprecated_keyword_alias(columns='cols', kwarg_columns='kwcols')
+    def plot(self, func, *args, col_input=None, cols=None, kwcols={}, paths=None, subsets=None, groups=None, autolabel=True, ax=None, global_selection=None, title=None, iter_kwargs={}, **kwargs):
         '''
         Make a plot given a plotting function.
         
@@ -996,19 +1130,20 @@ class Data():
 
         Parameters
         ----------
-        func : function
-            Function to make plots, e.g. ``plt.plot``.
+        func : str or Callable
+            Function to make plots, e.g. ``plt.plot``,
+            or name of the function, e.g. ``'plot'``.
         *args : 
             Arguments to be passed to func.
-        columns : str or list of str, optional
+        cols : str or list of str, optional
             The name of the columns to be passed to ``func``. 
-            For example, if ``columns = ['col1', 'col2']``, ``func`` will be called by:
+            For example, if ``cols = ['col1', 'col2']``, ``func`` will be called by:
                 ``func(data.t['col1'], data.t['col2'], *args)``
             `Note`: When ``autolabel`` is True, the len of this argument is used to guess the dimension of the plot (e.g. 2D/3D).
             The default is None.
-        kwarg_columns : dict, optional
+        kwcols : dict, optional
             Names of data columns that are passed to ``func`` as keyword arguments.
-            For example, if ``kwargs_columns={'x': 'col1', 'y':'col2'}``, ``func`` will be called by:
+            For example, if ``kwcols={'x': 'col1', 'y':'col2'}``, ``func`` will be called by:
                 ``func(x=data.t['col1'], y=data.t['col2'])``
         paths : str or list of str, optional
             The full path of a subset (e.g. ``'<group_name>/<subset_name>'``) or a list of paths.
@@ -1033,10 +1168,13 @@ class Data():
             Note that this is ONLY used for adding axis labels and legends; 
             if you would like to plot on a specific axis, consider passing e.g. ``ax.plot`` to argument ``func``.
             The default is None.
-        global_selection : ``astrodata.table.Subset``, optional
+        global_selection : ``astrodata.table.Subset`` or str, optional
             The global selection for this plot. 
             If not None, only data selected by this argument is plotted.
             The default is None.
+        title : str
+            Manually setting the title of the plot. This will overwrite the title automatically generated.
+            The default is None (automatically generated if autolabel is True).
         iter_kwargs : dict, optional
             Lists of keywoard arguments that are different for each subset specified. 
             Suppose 3 subsets are specified using the ``subsets`` argument, an example value for 
@@ -1062,13 +1200,27 @@ class Data():
         >>> data.plot(ax.plot, ax=ax, columns=('col1', 'col2'), color='k')
         '''
         iter_kwargs = iter_kwargs.copy()
-        kwarg_columns = kwarg_columns.copy()
+        kwarg_columns = kwcols.copy()
+        columns = cols
         
+        if type(func) is str:
+            if func not in plot_funcs:
+                raise ValueError(f'Supported func names are: {",".join(plot_funcs.keys())}')
+            func = plot_funcs[func]
+            
+        # TODO: experimental (do not force users to input ax for auto labels)
+        if ax is None:
+            ax = plt.gca()
+        
+        if type(global_selection) is str:
+            global_selection = self.get_subsets(path=global_selection)
+
         subset_names = subsets
         subsets = self.get_subsets(path=paths, name=subset_names, group=groups)
         if type(subsets) is Subset:
             subsets = [subsets]
         
+        local_subsets = subsets
         if global_selection is not None:
             subsets = [(subset & global_selection) for subset in subsets]
             
@@ -1080,8 +1232,8 @@ class Data():
         # try to automatically set label
         if autolabel:
             if 'label' not in iter_kwargs: # label for single plot element
-                iter_kwargs['label'] = [subset.label for subset in subsets]
-            if ax is not None:
+                iter_kwargs['label'] = [subset.label for subset in local_subsets]
+            if ax is not None and columns is not None:
                 ax.set(**dict(zip(
                     ['xlabel', 'ylabel', 'zlabel'], 
                     [self.col_labels[col] if col in self.col_labels else col for col in columns]
@@ -1116,10 +1268,19 @@ class Data():
         if autolabel and ax is not None:
             if len(subset_data_list) > 1:
                 ax.legend()
-            else:
+                if global_selection is not None:
+                    ax.set_title(global_selection.label)
+            else: # only one data plot, just use title instead of legend
                 ax.set_title(subsets[0].label)
+        
+        if title is not None:
+            if ax is None:
+                warnings.warn('To set the title, please input the axis, e.g. data.plot(<...>, ax=your_axis)')
+            else:
+                ax.set_title(title)
     
-    def subplot_array(self, func, *args, columns=None, kwarg_columns={}, plotgroups=None, arraygroups=None, global_selection=None, share_ax=False, autobreak=False, autolabel=True, ax_callback=None, axes=None, fig=None, iter_kwargs={}, **kwargs):
+    @deprecated_keyword_alias(columns='cols', kwarg_columns='kwcols')
+    def subplot_array(self, func, *args, cols=None, kwcols={}, plotgroups=None, arraygroups=None, global_selection=None, share_ax=False, autobreak=False, autolabel=True, ax_callback=None, axes=None, fig=None, iter_kwargs={}, **kwargs):
         '''
         Plot an "array" of subplots (panels; subplots with several rows and columns) for different selections given in ``arraygroups``;
         Each of the panels consists of several plots for different selections given in ``plotgroups``.
@@ -1133,21 +1294,23 @@ class Data():
 
         Parameters
         ----------
-        func : function
-            Function that receives an axis as the only argument, 
+        func : str or Callable
+            Name of the ``matplotlib.pyplot`` function used to make plots, e.g. ``'plot'``, ``'scatter'``.
+            
+            Also accepts custum functions that receives an axis as the only argument, 
             and returns a function (called "plotting function" hereafter) to make plots.
             Example:``lambda ax: ax.plot``.
         *args : 
             Arguments to be passed to the plotting function.
-        columns : str or list of str, optional
+        cols : str or list of str, optional
             The name of the columns to be passed to the plotting function. 
-            For example, if ``columns = ['col1', 'col2']``, the plotting function will be called by:
+            For example, if ``cols = ['col1', 'col2']``, the plotting function will be called by:
                 ``plotting_function(data.t['col1'], data.t['col2'], *args)``
             `Note`: When ``autolabel`` is True, the len of this argument is used to guess the dimension of the plot (e.g. 2D/3D).
             The default is None.
-        kwarg_columns : dict, optional
+        kwcols : dict, optional
             Names of data columns that are passed to the plotting function as keyword arguments.
-            For example, if ``kwargs_columns={'x': 'col1', 'y':'col2'}``, the plotting function will be called by:
+            For example, if ``kwcols={'x': 'col1', 'y':'col2'}``, the plotting function will be called by:
                 ``plotting_function(x=data.t['col1'], y=data.t['col2'])``
         plotgroups : str, optional
             The name of the subset group used to make different plots in each one of the panels. 
@@ -1162,7 +1325,7 @@ class Data():
                 - ``arraygroups = ['group1', 'group2']``, where `'group1', 'group2'` consists of 3, 4 subsets respectively. 
                   Then subplots with ``nrow=3, ncol=4`` (3x4) are generated.
             The default is None.
-        global_selection : ``astrotable.table.Subset``, optional
+        global_selection : ``astrotable.table.Subset`` or str, optional
             Only consider data in subset ``global_selection``.
             The default is None (the whole dataset is considered).
         share_ax : bool, optional
@@ -1214,19 +1377,30 @@ class Data():
         if share_ax: raise NotImplementedError('This feature is not implemented, and whether it will be added is undetermined.')
         
         iter_kwargs = iter_kwargs.copy()
-        kwarg_columns = kwarg_columns.copy()
+        kwarg_columns = kwcols.copy()
+        columns = cols
+        
+        if type(func) is str:
+            if func not in plot_array_funcs:
+                raise ValueError(f'Supported func names are: {",".join(plot_array_funcs.keys())}')
+            func = plot_array_funcs[func]
+
+        if type(global_selection) is str:
+            global_selection = self.get_subsets(path=global_selection)
 
         if arraygroups is None:
+            if axes is None:
+                axes = plt.gca()
             if isinstance(axes, Iterable):
                 axes = axes[0]
-            return self.plot(func, *args, columns=columns, paths=None, subsets=None, groups=plotgroups, autolabel=autolabel, ax=axes, iter_kwargs=iter_kwargs, **kwargs)
+            return self.plot(func(axes), *args, cols=columns, paths=None, subsets=None, groups=plotgroups, autolabel=autolabel, ax=axes, iter_kwargs=iter_kwargs, **kwargs)
 
         # get subsets for each panel
         if type(arraygroups) is str:
             arraygroups = [arraygroups]
         subsets = [self.get_subsets(group=group, listalways=True) for group in arraygroups]
-        if global_selection is not None:
-            subsets = [[subset & global_selection for subset in subseti] for subseti in subsets]
+        # if global_selection is not None:
+        #     subsets = [[subset & global_selection for subset in subseti] for subseti in subsets]
         if len(subsets) >= 3:
             raise ValueError('len(plotgroups) >=3: plot array of dim >= 3 not supported. ')
         elif len(subsets) == 2:
@@ -1235,9 +1409,9 @@ class Data():
             subset_array = subsets
             
         # decide nrow and ncol and check inputs
-        if autobreak: # autobreak is not a comprehensive function
-            if len(subsets) in subplot_arrange:
-                nrow, ncol = subplot_arrange[len(subsets)]
+        if len(subsets) == 1 and autobreak: # autobreak is not a comprehensive function
+            if len(subsets[0]) in subplot_arrange:
+                nrow, ncol = subplot_arrange[len(subsets[0])]
             else:
                 pass # TODO: not implemented
         else:
@@ -1249,7 +1423,13 @@ class Data():
             if fig is None:
                 fig = plt.figure(figsize=figsize)
             axes = fig.subplots(nrow, ncol)
-        elif not isinstance(axes, Iterable):
+        else:
+            if fig is None:
+                if isinstance(axes, Iterable):
+                    fig = axes.flatten()[0]
+                else:
+                    fig = axes.figure
+            if not isinstance(axes, Iterable):
                 axes = [axes]
         axes_flat = np.array(axes).flatten()
         if len(axes_flat) != nrow*ncol:
@@ -1257,9 +1437,15 @@ class Data():
         
         # plot subplots
         for ax, subset in zip(axes_flat, chain(*subset_array)):
-            self.plot(func(ax), *args, columns=columns, kwarg_columns=kwarg_columns, groups=plotgroups, autolabel=True, ax=ax, global_selection=subset, iter_kwargs=iter_kwargs, **kwargs)
+            if global_selection is not None:
+                subset_with_global = subset & global_selection
+            else:
+                subset_with_global = subset
+            self.plot(func(ax), *args, cols=columns, kwcols=kwarg_columns, groups=plotgroups, autolabel=True, ax=ax, global_selection=subset_with_global, title=subset.label, iter_kwargs=iter_kwargs, **kwargs)
             if ax_callback is not None:
                 ax_callback(ax)
+        if autolabel and global_selection is not None:
+            fig.suptitle(global_selection.label)
         
         return fig, axes
     

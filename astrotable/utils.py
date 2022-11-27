@@ -9,6 +9,7 @@ import numpy as np
 import warnings
 import pickle
 import os
+from functools import wraps
 
 #%% array/Iterable operation
 
@@ -57,6 +58,7 @@ def grid(x, y, flat=False):
 
 # Modified dictionary. If each value has the same length, it is similar to pandas.DataFrame, but simpler.
 class objdict(dict):
+    # author: Senko Rašić
     # from https://goodcode.io/articles/python-dict-object/?msclkid=daff3822c47111eca4f572e5716ccae3
     def __getattr__(self, name):
         if name in self:
@@ -167,4 +169,29 @@ def load_pickle(fname):
             return data[0]
         else:
             return data
+
+#%% wrappers
+def deprecated_keyword_alias(**aliases):
+    '''
+    Returns wrapper for deprecated alias of keyword arguments.
+
+    Parameters
+    ----------
+    **aliases : old = new
+        old (deprecated) name and new name
+    '''
+    def wrapper(f):
+        @wraps(f)
+        def fnew(*args, **kwargs):
+            for old, new in aliases.items():
+                if old in kwargs:
+                    if new in kwargs:
+                        raise TypeError(f"Both {old} and {new} found in arguments; use {new} only.")
+                    kwargs[new] = kwargs.pop(old)
+                    warnings.warn(f"argument '{old}' is deprecated; use '{new}' instead",
+                                  category=FutureWarning, # this is a warning for end-users rather than programmers
+                                  stacklevel=2)
+            return f(*args, **kwargs)
+        return fnew
+    return wrapper
 

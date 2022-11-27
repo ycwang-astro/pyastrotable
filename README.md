@@ -17,7 +17,7 @@ pip install git+https://github.com/ycwang-astro/pyastrotable.git
 ```
 
 ## Documentation
-For tutorials, see [tutorial on matching](https://github.com/ycwang-astro/pyastrotable/blob/main/tutorial1_matching.ipynb) and tutorial on subsets (coming soon).
+For tutorials, see [tutorial on matching](tutorials/tutorial1_matching.ipynb) and [tutorial on subsets and plots](tutorials/tutorial2_subset_and_plot.ipynb).
 
 ## Future updates
 Planned future updates:

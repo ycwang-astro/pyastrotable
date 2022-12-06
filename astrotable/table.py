@@ -10,12 +10,15 @@ Main tools to store, operate and visualize data tables.
 import matplotlib.pyplot as plt
 import numpy as np
 from astropy.table import Column, Table, hstack
-from astrotable.utils import objdict, save_pickle, deprecated_keyword_alias
+from astrotable.utils import objdict, save_pickle, load_pickle, deprecated_keyword_alias
 import warnings
 import multiprocessing as mp
 from collections.abc import Iterable
 import inspect
 from itertools import repeat, chain
+import os
+import zipfile
+import pickle
 # import re
 # import time
 
@@ -209,7 +212,7 @@ class Subset():
             else:
                 # check string: avoid error if the string contains something like "self", "data" but are not real column names
                 for name in chain(locals(), globals()):
-                    if name in ['np']:
+                    if name in ['np', 'os']:
                         continue
                     if name in self.selection and name not in data.colnames:
                         raise KeyError(name)
@@ -314,6 +317,10 @@ class Data():
         if name is None:
             warnings.warn('It is strongly recommended to input a name.')
 
+        # TODO: save a pkl (or other formats) file while reading an ascii file,
+        # so that the next time this ascii file is read (if not modified), use the pkl
+        # file to accelerate data loading process.
+        
         # get data
         if type(data) is str: # got a path
             self.t = Table.read(data, **kwargs)
@@ -406,7 +413,7 @@ class Data():
                 self.unmatch(data1)
             else:
                 raise ValueError(f"Data with name '{data1.name}' has already been matched. This may result from name duplicates or re-matching the same catalog. \
-                                 Set 'replace=True' to replace the existing match with '{data1.name}'.")
+Set 'replace=True' to replace the existing match with '{data1.name}'.")
         
         matcher.get_values(self, data1, verbose=verbose)
         idx, matched = matcher.match()
@@ -612,14 +619,14 @@ class Data():
         if type(keep_unmatched) is str:
             keep_unmatched = [keep_unmatched]
         
-        matched = np.full((len(self),), True)
+        matched = np.full((len(self),), True) # whether a record in self is matched
         data1_matched_tables = []
         unnamed_count = 0
         data_names = [self.name]
         
         merged_matchinfo = self.merge_matchinfo(depth=depth)
         
-        # get matched indices
+        ## get matched indices
         for matchinfo in merged_matchinfo:
             data1 = matchinfo.data1
             if data1.name not in keep_unmatched:
@@ -635,7 +642,14 @@ class Data():
         if unnamed_count > 0 and verbose:
             print(f'found no names for {unnamed_count} sets of data, automatically named with numbers.')
         
-        # cut data
+        ## cut data ##
+        # cut myself
+        data = self.t[matched]
+        if self.name in merge_columns:
+            data.keep_columns(merge_columns[self.name])
+        if self.name in ignore_columns:
+            data.remove_columns(ignore_columns[self.name])
+        
         for matchinfo in merged_matchinfo:
             data1 = matchinfo.data1
             idx = matchinfo.idx
@@ -662,10 +676,6 @@ class Data():
             
             data1_matched_tables.append(data1_matched_table)
         
-        data = self.t[matched]
-        
-        if self.name in merge_columns:
-            data = data[merge_columns[self.name]]
         matched_table = hstack([data] + data1_matched_tables, table_names=data_names)
         
         if outname is None:
@@ -676,6 +686,26 @@ class Data():
         if verbose: print('merged: ' + ', '.join(data_names))
         
         return matched_data
+    
+    def from_which(self, colname):
+        '''
+        Find the name of the data from which ``colname`` is matched.
+
+        Parameters
+        ----------
+        colname : str
+            Column name.
+
+        Returns
+        -------
+        data_name : str
+            The name of the data from which ``colname`` is matched.
+
+        '''
+        if colname not in self.colnames:
+            raise KeyError(colname)
+        else:
+            raise NotImplementedError()
     
     def match_merge(self, data1, matcher, keep_unmatched=[], merge_columns={}, ignore_columns={}, outname=None, verbose=True):
         '''
@@ -1451,11 +1481,114 @@ class Data():
     
     #### IO
     
-    def save(self, path, format='pkl', overwrite=False):
+    # data when saving and loading "data" (zip) files.
+    data_to_save = {
+        # attribute name: save method
+        'col_labels': 'pkl',
+        'subset_groups': 'pkl',
+        't': 'astropy.table',
+        'name': 'pkl',
+        'matchlog': 'pkl',
+        }
+    table_format = 'fits' # 'asdf' # 'ascii.ecsv'
+    table_ext = '.fits' # '.asdf' # '.ecsv'
+    
+    def save(self, path, format='data', overwrite=False):
+        '''
+        Save data to file.
+
+        Parameters
+        ----------
+        path : str
+            Path to the file.
+        format : str, optional
+            The format of the file. 
+            The default is 'data'.
+            Supported formats include:
+                'pkl': 
+                    Saving the full data object to a "*.pkl" file. 
+                'data' (default):
+                    Saving key data (including the data table, the subsets, etc.) to a "*.data" file.
+                    Note that the matching data is not saved.
+                Other formats: Any format supported by ``astropy.table.Table.write``. 
+                    Only saving the data table (``astropy.table.Table``). 
+                    This is equivalent to ``data.t.write(<...>)``.
+        overwrite : bool, optional
+            Whether to overwrite the file if it exists. 
+            If set to ``False``, a ``FileExistsError`` will be raised.
+            The default is False.
+
+        Raises
+        ------
+        FileExistsError
+            The file already exists.
+        '''
         if format == 'pkl':
             save_pickle(path, overwrite, self)
+        elif format == 'data': # save important data in a zip file
+            if path[-5:] != '.data':
+                path += '.data'
+            if not overwrite and os.path.exists(path):
+                raise FileExistsError(f'File "{path}" already exists. To overwrite, use the argument "overwrite=True".')
+            with zipfile.ZipFile(path, mode='w', compression=zipfile.ZIP_DEFLATED) as datazip:
+                for attr, method in Data.data_to_save.items():
+                    if method == 'astropy.table':
+                        fname = attr + Data.table_ext
+                        table = getattr(self, attr)
+                        assert type(table) == Table
+                        with datazip.open(fname, mode='w') as f:
+                            table.write(f, format=Data.table_format) # ascii.ecsv
+                    elif method == 'pkl':
+                        fname = attr + '.pkl'
+                        with datazip.open(fname, mode='w') as f:
+                            pickle.dump(getattr(self, attr), f)
+                    else:
+                        raise ValueError(f'unrecognized saving method: {method}')
+                        
         else:
             self.t.write(path, format=format, overwrite=overwrite)
+    
+    @classmethod
+    def load(cls, path, format='data'):
+        '''
+        Load a saved data.
+
+        Parameters
+        ----------
+        path : str
+            Path to the file.
+        format : str, optional
+            The format of the file (see ``help(Data.save)``). 
+            The default is 'data'.
+
+        Returns
+        -------
+        data : ``astrotable.table.Data``
+        '''
+        if format == 'data':
+            attrs = {}
+            with zipfile.ZipFile(path) as datazip:
+                for attr, method in Data.data_to_save.items():
+                    if method == 'astropy.table':
+                        fname = attr + Data.table_ext
+                        with datazip.open(fname) as f:
+                            attrs[attr] = Table.read(f, format=Data.table_format) # ascii.ecsv
+                    elif method == 'pkl':
+                        fname = attr + '.pkl'
+                        with datazip.open(fname) as f:
+                            attrs[attr] = pickle.load(f)
+                    else:
+                        raise ValueError(f'unrecognized saving method: {method}')
+            dataname = attrs['name'] if 'name' in attrs else None
+            data = cls(attrs['t'], name=dataname)
+            update_names = [i for i in attrs if i not in ['name', 't']] # attrs that need to be updated
+            for name in update_names:
+                setattr(data, name, attrs[name])
+            return data
+        elif format == 'pkl':
+            return load_pickle(path)
+        else:
+            return cls(path)
     
     #### basic methods
     

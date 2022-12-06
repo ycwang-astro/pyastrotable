@@ -170,6 +170,8 @@ def load_pickle(fname):
         else:
             return data
 
+# def save_zip(fname, ext='zip', overwrite=False)
+
 #%% wrappers
 def deprecated_keyword_alias(**aliases):
     '''

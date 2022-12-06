@@ -155,7 +155,7 @@ class SkyMatcher():
         plt.axvline(np.log10(self.thres), color='r', linestyle='--')
         plt.xlabel('lg (d / arcsec)')
         plt.title(f"Min. distance to '{data1.name}' objects for each '{data.name}' object\nthreshold={self.thres}\"")
-        
+        return d2d.arcsec
         
     def __repr__(self):
         return f'SkyMatcher with thres={self.thres}'

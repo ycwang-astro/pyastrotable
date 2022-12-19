@@ -14,6 +14,7 @@ from astrotable.utils import objdict, save_pickle, load_pickle, deprecated_keywo
 import warnings
 import multiprocessing as mp
 from collections.abc import Iterable
+from collections import OrderedDict
 import inspect
 from itertools import repeat, chain
 import os
@@ -44,6 +45,9 @@ plot_array_funcs = {
     'hist2d': lambda ax: ax.hist2d,
     'errorbar': lambda ax: ax.errorbar,
     }
+
+class FailedToLoadError(Exception):
+    pass
 
 class Subset():
     '''
@@ -314,6 +318,9 @@ class Data():
             if a str is passed to argument `data`.
 
         '''
+        if type(data) is str and 'format' in kwargs and kwargs['format'] in ['data', 'pkl']: # should use Data.load
+            raise ValueError(f"to load data file saved with Data.save, use Data.load('{data}', format='{kwargs['format']}')")
+        
         if name is None:
             warnings.warn('It is strongly recommended to input a name.')
 
@@ -333,11 +340,20 @@ class Data():
             self.path = None
          
         # basic properties
-        self.colnames = self.t.colnames
         self.name = name
         if self.name is None and self.path is not None:
             self.name = self.path.split('/')[-1].split('\\')[-1]
         # self.id = time.time() #time.strftime('%y%m%d%H%M%S')
+        
+        # set metadata for columns (TODO: experimental feature)
+        if type(data) is str: # got a path
+            for colname in self.colnames:
+                col = self.t[colname]
+                if 'src' not in col.meta.keys():
+                    col.meta['src'] = self.name
+                    col.meta['src_detail'] = f'"{self.path}"'
+        else:
+            pass # TODO: not safe to set metadata for other input format, as they may have their own metadata
         
         # matching
         self.matchinfo = []
@@ -354,7 +370,12 @@ class Data():
         # plot
         self.col_labels = {} # {column_name: label_in_figures}
         self.labels = self.col_labels # alternative name for col_labels
-        
+    
+    #### properties
+    @property
+    def colnames(self):
+        return self.t.colnames
+    
     #### matching & merging 
     def match(self, data1, matcher, verbose=True, replace=False):
         '''
@@ -687,25 +708,60 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         
         return matched_data
     
-    def from_which(self, colname):
+    def from_which(self, colname=None, detail=True):
         '''
-        Find the name of the data from which ``colname`` is matched.
+        When reading a dataset from a file using ``Data(<path>, name=<name>)``, 
+        the name of the data is associated with each columns. 
+        After matching and merging it with other datasets, you may want to 
+        check the name of the data from which ``colname`` is matched.
+        See examples below.
+        
+        **WARNING**: The information for user-added columns may be invalid.
 
         Parameters
         ----------
-        colname : str
+        colname : str, optional
             Column name.
-
+            If this argument is not given, a dict with the information for all columns 
+            will be returned.
+        detail : bool, optional
+            Whether the detail of the data is returned. The default is True.
+        
         Returns
         -------
-        data_name : str
-            The name of the data from which ``colname`` is matched.
+        str or dict
+            The name (str) of the data from which ``colname`` is matched,
+            or a dict containing the information for all columns.
 
+        Examples
+        --------
+        Say you have two catalog files, ``cat1.csv`` and ``cat2.csv``.
+        
+            >>> cat1 = Data('cat1.csv', name=cat1) # with columns 'col1', etc.
+            >>> cat2 = Data('cat2.csv', name=cat2) # with columns 'col2', etc.
+            >>> cat_merged = cat1.match(cat2, SkyMatcher()).merge()
+            ... # cat_merged has columns 'col1', 'col2', etc.
+            >>> cat_merged.from_which('col1')
+            cat1 (loaded from "cat1.csv")
+            >>> cat_merged.from_which('col2')
+            cat2 (loaded from "cat2.csv")
+            
         '''
-        if colname not in self.colnames:
+        warnings.warn('WARNING: The information for user-added columns may be invalid.')
+        if colname is None:
+            return OrderedDict((name, self.from_which(name, detail=detail)) for name in self.colnames)
+        elif colname not in self.colnames:
             raise KeyError(colname)
         else:
-            raise NotImplementedError()
+            meta = self.t[colname].meta
+            if 'src' in meta.keys():
+                src, src_detail = meta['src'], meta['src_detail']
+                info = src
+                if detail:
+                    info += f' ({src_detail})'
+                return info
+            else:
+                return ''
     
     def match_merge(self, data1, matcher, keep_unmatched=[], merge_columns={}, ignore_columns={}, outname=None, verbose=True):
         '''
@@ -1549,9 +1605,13 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             self.t.write(path, format=format, overwrite=overwrite)
     
     @classmethod
-    def load(cls, path, format='data'):
+    def load(cls, path, format='data', **kwargs):
         '''
-        Load a saved data.
+        Load a data file saved with ``Data.save()`` (usually with ".data" or ".pkl" format).
+        
+        **Note**: You may also read a raw table file like "*.csv", but it 
+        is suggested to use ``Data('your_catalog.csv')`` instead of 
+        ``Data.load('your_catalog.csv', format='ascii.csv')``.
 
         Parameters
         ----------
@@ -1560,6 +1620,9 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         format : str, optional
             The format of the file (see ``help(Data.save)``). 
             The default is 'data'.
+        **kwargs :
+            other arguments passed when initializing ``Data`` 
+            [Only used when format is neither 'data' nor 'pkl'.]
 
         Returns
         -------
@@ -1567,18 +1630,27 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         '''
         if format == 'data':
             attrs = {}
-            with zipfile.ZipFile(path) as datazip:
-                for attr, method in Data.data_to_save.items():
-                    if method == 'astropy.table':
-                        fname = attr + Data.table_ext
-                        with datazip.open(fname) as f:
-                            attrs[attr] = Table.read(f, format=Data.table_format) # ascii.ecsv
-                    elif method == 'pkl':
-                        fname = attr + '.pkl'
-                        with datazip.open(fname) as f:
-                            attrs[attr] = pickle.load(f)
-                    else:
-                        raise ValueError(f'unrecognized saving method: {method}')
+            try:
+                with zipfile.ZipFile(path) as datazip:
+                    for attr, method in Data.data_to_save.items():
+                        if method == 'astropy.table':
+                            fname = attr + Data.table_ext
+                            with datazip.open(fname) as f:
+                                attrs[attr] = Table.read(f, format=Data.table_format, # ascii.ecsv
+                                                         # unit_parse_strict='silent',
+                                                         )
+                        elif method == 'pkl':
+                            fname = attr + '.pkl'
+                            with datazip.open(fname) as f:
+                                attrs[attr] = pickle.load(f)
+                        else:
+                            raise ValueError(f'unrecognized saving method: {method}')
+            except zipfile.BadZipFile:
+                raise ValueError(f'The file is not a ".data" file. Did you mean "Data(\'{path}\', <...>)"?')
+            except KeyError:
+                raise FailedToLoadError(f"Failed to load '{path}': is not a '.data' file or is saved with an older version of astrotable.")
+            except:
+                raise
             dataname = attrs['name'] if 'name' in attrs else None
             data = cls(attrs['t'], name=dataname)
             update_names = [i for i in attrs if i not in ['name', 't']] # attrs that need to be updated
@@ -1588,7 +1660,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         elif format == 'pkl':
             return load_pickle(path)
         else:
-            return cls(path)
+            return cls(path, format=format, **kwargs)
     
     #### basic methods
     
@@ -1596,11 +1668,20 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         return len(self.t)
     
     def __getitem__(self, item):
-        warnings.warn('Although supported, it is not suggested to access table by directly subscripting Data objects. Use e.g. data.t[index] instead of data[index].')
+        # warnings.warn('Although supported, it is not suggested to access table by directly subscripting Data objects. Use e.g. data.t[index] instead of data[index].')
         return (self.t[item])
         # return Data(self.t[item])
     
     def __setitem__(self, item, value):
-        warnings.warn('Although supported, it is not suggested to set items of the table by directly subscripting Data objects. Use e.g. data.t[index] instead of data[index].')
+        # only changes metadata when adding one new column; 
+        # see data.t's __setitem__ (astropy.table.table.Table.__setitem__)
+        # TODO: better handle metadata (but maybe no need to change metadata for 
+        # changing existing columns; adding several new column seems to be unsupported)
+        
+        # warnings.warn('Although supported, it is not suggested to set items of the table by directly subscripting Data objects. Use e.g. data.t[index] instead of data[index].')
+        new = isinstance(item, str) and item not in self.colnames
         self.t[item] = value
-
+        if new:
+            self.t[item].meta['src'] = 'user-added'
+            self.t[item].meta['src_detail'] = ''
+        

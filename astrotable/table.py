@@ -10,7 +10,7 @@ Main tools to store, operate and visualize data tables.
 import matplotlib.pyplot as plt
 import numpy as np
 from astropy.table import Column, Table, hstack
-from astrotable.utils import objdict, save_pickle, load_pickle, deprecated_keyword_alias
+from astrotable.utils import objdict, save_pickle, load_pickle, deprecated_keyword_alias, bitwise_all
 import warnings
 import multiprocessing as mp
 from collections.abc import Iterable
@@ -201,6 +201,8 @@ class Subset():
             This is used to generate automatic subset names.
             The default is ().
         '''
+        self.data_name = data.name
+        
         # get selection array and expression
         if callable(self.selection):
             if self.expression is None: 
@@ -287,6 +289,10 @@ class Subset():
         if np.array(self.selection).dtype != bool: #not isinstance(self.selection, Iterable):
             raise RuntimeError('Selection should be a boolean array. Maybe forgot to run eval_()?.')
         return self.selection
+    
+    def __len__(self):
+        # this is actually (and should be) the same as len(data).
+        return len(np.array(self))
     
     def __repr__(self):
         # return f"Subset('{self.selection}')"
@@ -1254,9 +1260,13 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             Note that this is ONLY used for adding axis labels and legends; 
             if you would like to plot on a specific axis, consider passing e.g. ``ax.plot`` to argument ``func``.
             The default is None.
-        global_selection : ``astrodata.table.Subset`` or str, optional
-            The global selection for this plot. 
+        global_selection : ``astrodata.table.Subset`` or str or list of str, optional
+            The global selection [or the path(s) of the selection(s)] for this plot. 
             If not None, only data selected by this argument is plotted.
+            Accepted input:
+                - An ``astrotable.table.Subset`` object. Note that logical operations of subsets are supported, e.g. ``subset1 & subset2 | subset3``.
+                - The path to the subset, i.e. ``'groupname/subsetname'``. If group name is 'default', you can directly use 'subsetname'.
+                - A list/tuple/set of paths to the subsets. The global selection will be the logical AND (i.e. the intersection set) of the subsets.
             The default is None.
         title : str
             Manually setting the title of the plot. This will overwrite the title automatically generated.
@@ -1298,8 +1308,8 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         if ax is None:
             ax = plt.gca()
         
-        if type(global_selection) is str:
-            global_selection = self.get_subsets(path=global_selection)
+        if type(global_selection) in (str, tuple, list, set):
+            global_selection = bitwise_all(self.get_subsets(path=global_selection, listalways=True))       
 
         subset_names = subsets
         subsets = self.get_subsets(path=paths, name=subset_names, group=groups)
@@ -1411,8 +1421,12 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
                 - ``arraygroups = ['group1', 'group2']``, where `'group1', 'group2'` consists of 3, 4 subsets respectively. 
                   Then subplots with ``nrow=3, ncol=4`` (3x4) are generated.
             The default is None.
-        global_selection : ``astrotable.table.Subset`` or str, optional
+        global_selection : ``astrotable.table.Subset`` or str or list of str, optional
             Only consider data in subset ``global_selection``.
+            Accepted input:
+                - An ``astrotable.table.Subset`` object. Note that logical operations of subsets are supported, e.g. ``subset1 & subset2 | subset3``.
+                - The path to the subset, i.e. ``'groupname/subsetname'``. If group name is 'default', you can directly use 'subsetname'.
+                - A list/tuple/set of paths to the subsets. The global selection will be the logical AND (i.e. the intersection set) of the subsets.
             The default is None (the whole dataset is considered).
         share_ax : bool, optional
             Whether the x, y axes are shared. The default is False.
@@ -1471,8 +1485,8 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
                 raise ValueError(f'Supported func names are: {",".join(plot_array_funcs.keys())}')
             func = plot_array_funcs[func]
 
-        if type(global_selection) is str:
-            global_selection = self.get_subsets(path=global_selection)
+        if type(global_selection) in (str, tuple, list, set):
+            global_selection = bitwise_all(self.get_subsets(path=global_selection, listalways=True))
 
         if arraygroups is None:
             if axes is None:

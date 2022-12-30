@@ -24,7 +24,7 @@ Planned future updates:
 - More documentation and demostrations
 - New feature: convenient plotting functions
 
-## Change log
+## Changelog
 ### 0.2.0
 New features:
 - Row subsets or groups of row subsets of catalogs

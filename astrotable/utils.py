@@ -9,7 +9,8 @@ import numpy as np
 import warnings
 import pickle
 import os
-from functools import wraps
+from functools import wraps, reduce
+from operator import iand
 
 #%% array/Iterable operation
 
@@ -53,6 +54,13 @@ def grid(x, y, flat=False):
         xx = [[xi for xi in x] for yi in y]
         yy = [[yi for xi in x] for yi in y]
     return xx, yy
+
+def bitwise_all(iterable):
+    '''
+    Return the bitwise all of an iterable. 
+    For example, ``bitwize_all([a, b, c])`` is equivalent to ``a & b & c``.
+    '''
+    return reduce(iand, iterable)
 
 #%% basic types
 

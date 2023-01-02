@@ -259,6 +259,10 @@ class Subset():
         for colname, labelstr in data.col_labels.items():
             self.label = self.label.replace(colname, labelstr)
     
+    @property
+    def size(self): # the size of the subset
+        return np.sum(np.array(self))
+    
     def __and__(self, subset): # the & (bitwise AND)
         selection = self.selection & subset.selection
         name = f'{self.name} & {subset.name}'
@@ -286,8 +290,8 @@ class Subset():
         return Subset(selection, name, expression, label)
     
     def __array__(self):
-        if np.array(self.selection).dtype != bool: #not isinstance(self.selection, Iterable):
-            raise RuntimeError('Selection should be a boolean array. Maybe forgot to run eval_()?.')
+        if not hasattr(self.selection, 'dtype') or self.selection.dtype != bool: #not isinstance(self.selection, Iterable):
+            raise RuntimeError('Selection should be a boolean array. Maybe forgot to run eval_()?')
         return self.selection
     
     def __len__(self):
@@ -371,11 +375,9 @@ class Data():
         self.subset_groups = {
             'default': {'all': self.subset_all}
             }
-        self.subsets = self.subset_data # another name for subset_data
         
         # plot
         self.col_labels = {} # {column_name: label_in_figures}
-        self.labels = self.col_labels # alternative name for col_labels
     
     #### properties
     @property
@@ -1171,7 +1173,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         shown_groups = {k: self.subset_groups[k] for k in group}
         for groupname, subsets in shown_groups.items():
             for subsetname, subset in subsets.items():
-                n_selected = np.sum(subset.selection)
+                n_selected = subset.size # same as np.sum(subset.selection)
                 summary.add_row(dict(
                     group=groupname, name=subsetname,
                     size=n_selected, fraction=n_selected/len(subset.selection),
@@ -1299,6 +1301,8 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         kwarg_columns = kwcols.copy()
         columns = cols
         
+        if type(columns) is str:
+            columns = [columns]
         if type(func) is str:
             if func not in plot_funcs:
                 raise ValueError(f'Supported func names are: {",".join(plot_funcs.keys())}')
@@ -1351,8 +1355,6 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             if columns is None:
                 input_data = () # input data for the func (as *args)
             else:
-                if type(columns) is str:
-                    columns = [columns]
                 input_data = []
                 for column in columns:
                     input_data.append(subset_data.t[column])
@@ -1531,7 +1533,8 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
                     fig = axes.figure
             if not isinstance(axes, Iterable):
                 axes = [axes]
-        axes_flat = np.array(axes).flatten()
+        axes = np.array(axes)
+        axes_flat = axes.flatten()
         if len(axes_flat) != nrow*ncol:
             raise ValueError(f'Expected {nrow}*{ncol}={nrow*ncol} axes; got {len(axes)}.')
         
@@ -1699,3 +1702,10 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             self.t[item].meta['src'] = 'user-added'
             self.t[item].meta['src_detail'] = ''
         
+    #### alternative names
+    @property
+    def labels(self): # alternative name for col_labels
+        return self.col_labels
+    
+    subsets = subset_data # another name for subset_data
+    

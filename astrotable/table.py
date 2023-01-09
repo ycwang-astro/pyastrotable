@@ -1332,7 +1332,11 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         # try to automatically set label
         if autolabel:
             if 'label' not in iter_kwargs: # label for single plot element
-                iter_kwargs['label'] = [subset.label for subset in local_subsets]
+                func_params = inspect.signature(func).parameters
+                if 'label' in func_params.keys() or any([param.kind == param.VAR_KEYWORD for param in func_params.values()]): # check if func supports label as argument
+                    iter_kwargs['label'] = [subset.label for subset in local_subsets]
+                else:
+                    warnings.warn(f'Failed to automatically set labels: function "{func.__name__}" does not support "label" as argument.')
             if ax is not None and columns is not None:
                 ax.set(**dict(zip(
                     ['xlabel', 'ylabel', 'zlabel'], 
@@ -1358,10 +1362,11 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
                 input_data = []
                 for column in columns:
                     input_data.append(subset_data.t[column])
+            this_kwarg_columns = {}
             for argname in kwarg_columns:
-                kwarg_columns[argname] = subset_data.t[kwarg_columns[argname]]
+                this_kwarg_columns[argname] = subset_data.t[kwarg_columns[argname]]
             
-            func(*input_data, *args, **kwarg_columns, **iter_kwargs, **kwargs)
+            func(*input_data, *args, **this_kwarg_columns, **iter_kwargs, **kwargs)
             
         if autolabel and ax is not None:
             if len(subset_data_list) > 1:

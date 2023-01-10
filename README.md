@@ -30,3 +30,6 @@ New features:
 - Row subsets or groups of row subsets of catalogs
 - Easily making plots comparing different subsets
 - Applying functions to each row of the catalog
+
+### 0.3.0 
+Coming soon

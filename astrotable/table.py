@@ -10,7 +10,8 @@ Main tools to store, operate and visualize data tables.
 import matplotlib.pyplot as plt
 import numpy as np
 from astropy.table import Column, Table, hstack
-from astrotable.utils import objdict, save_pickle, load_pickle, deprecated_keyword_alias, bitwise_all
+from astrotable.utils import objdict, save_pickle, load_pickle, keyword_alias, bitwise_all
+import astrotable.plot as plot
 import warnings
 import multiprocessing as mp
 from collections.abc import Iterable
@@ -31,20 +32,22 @@ subplot_arrange = {
     }
 
 plot_funcs = {
-    'plot': plt.plot,
-    'scatter': plt.scatter,
-    'hist': plt.hist,
-    'hist2d': plt.hist2d,
-    'errorbar': plt.errorbar,
+    'plot': plot.plot,
+    'scatter': plot.scatter,
+    'hist': plot.hist,
+    'hist2d': plot.hist2d,
+    'errorbar': plot.errorbar,
     }
 
-plot_array_funcs = {
-    'plot': lambda ax: ax.plot,
-    'scatter': lambda ax: ax.scatter,
-    'hist': lambda ax: ax.hist,
-    'hist2d': lambda ax: ax.hist2d,
-    'errorbar': lambda ax: ax.errorbar,
-    }
+plot_array_funcs = plot_funcs
+
+# plot_array_funcs = {
+#     'plot': lambda ax: ax.plot,
+#     'scatter': scatter_with_colorbar, # lambda ax: ax.scatter,
+#     'hist': lambda ax: ax.hist,
+#     'hist2d': lambda ax: ax.hist2d,
+#     'errorbar': lambda ax: ax.errorbar,
+#     }
 
 class FailedToLoadError(Exception):
     pass
@@ -1198,15 +1201,27 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         '''
         self.col_labels.update(**kwargs)
     
-    # def get_labels(self):
-    #     '''
-    #     Get the labels set by ``set_labels``.
-
-    #     Returns
-    #     -------
-    #     dict
-    #     '''
-    #     return self.col_labels
+    def get_labels(self, *cols, listalways=False):
+        '''
+        Get the labels of columns (if not set by ``set_labels``, the column name will be used).
+        
+        Parameters
+        ----------
+        *cols : str
+            names of the columns
+        listalways : bool, optional
+            If True, always returns list of labels (even if len(list) == 1).
+            The default is False.
+        
+        Returns
+        -------
+        str or list of str
+        '''
+        labels = [self.col_labels[col] if col in self.col_labels else col for col in cols]
+        if len(labels) == 1 and not listalways:
+            return labels[0]
+        else:
+            return labels
     
     # @property
     # def labels(self):
@@ -1214,7 +1229,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
     
     # TODO. argument col_input: plan: make it possible to input something like 'col1', 'col2', c='col3',
     # and translate it to make it the same as columns=('col1', 'col2'), kwarg_columns={'c': 'col3'}.
-    @deprecated_keyword_alias(columns='cols', kwarg_columns='kwcols')
+    @keyword_alias('deprecated', columns='cols', kwarg_columns='kwcols')
     def plot(self, func, *args, col_input=None, cols=None, kwcols={}, paths=None, subsets=None, groups=None, autolabel=True, ax=None, global_selection=None, title=None, iter_kwargs={}, **kwargs):
         '''
         Make a plot given a plotting function.
@@ -1290,12 +1305,12 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
 
         Examples
         --------
-        One simplest example:
+        One example:
             
         >>> from astrotable.table import Data
         >>> data = Data({'col1': [1, 2, 3], 'col2': [1, 4, 9]})
         >>> fig, ax = plt.subplots()
-        >>> data.plot(ax.plot, ax=ax, columns=('col1', 'col2'), color='k')
+        >>> data.plot(ax.plot, columns=('col1', 'col2'), color='k')
         '''
         iter_kwargs = iter_kwargs.copy()
         kwarg_columns = kwcols.copy()
@@ -1308,7 +1323,6 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
                 raise ValueError(f'Supported func names are: {",".join(plot_funcs.keys())}')
             func = plot_funcs[func]
             
-        # TODO: experimental (do not force users to input ax for auto labels)
         if ax is None:
             ax = plt.gca()
         
@@ -1332,16 +1346,28 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         # try to automatically set label
         if autolabel:
             if 'label' not in iter_kwargs: # label for single plot element
-                func_params = inspect.signature(func).parameters
+                # check if func supports label as input
+                if isinstance(func, plot.PlotFunction):
+                    func_params = func.func_sig.parameters
+                    func_name = func.func_defname
+                else:
+                    func_params = inspect.signature(func).parameters
+                    func_name = func.__name__
                 if 'label' in func_params.keys() or any([param.kind == param.VAR_KEYWORD for param in func_params.values()]): # check if func supports label as argument
                     iter_kwargs['label'] = [subset.label for subset in local_subsets]
                 else:
-                    warnings.warn(f'Failed to automatically set labels: function "{func.__name__}" does not support "label" as argument.')
+                    warnings.warn(f'Failed to automatically set labels: user-defined function "{func_name}" does not support "label" as argument.')
+            
+            # set axis label
             if ax is not None and columns is not None:
                 ax.set(**dict(zip(
                     ['xlabel', 'ylabel', 'zlabel'], 
-                    [self.col_labels[col] if col in self.col_labels else col for col in columns]
+                    self.get_labels(*columns, listalways=True),
                     )))
+            
+            # special case for my scatter()
+            if type(func) == plot.PlotFunction and type(func.func) == plot.Scatter and 'c' in kwarg_columns and 'barlabel' not in kwargs:
+                kwargs['barlabel'] = self.get_labels(kwarg_columns['c'])
         
         if iter_kwargs != {}:
             # check values
@@ -1355,6 +1381,11 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         else:
             iter_kwargs_list = repeat({})
         
+        if isinstance(func, plot.PlotFunction):
+            plot_func = func.in_plot # callback of func should not be recursively called.
+        else:
+            plot_func = func
+        
         for subset_data, iter_kwargs in zip(subset_data_list, iter_kwargs_list):
             if columns is None:
                 input_data = () # input data for the func (as *args)
@@ -1366,7 +1397,10 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             for argname in kwarg_columns:
                 this_kwarg_columns[argname] = subset_data.t[kwarg_columns[argname]]
             
-            func(*input_data, *args, **this_kwarg_columns, **iter_kwargs, **kwargs)
+            plot_func(*input_data, *args, **this_kwarg_columns, **iter_kwargs, **kwargs)
+        
+        if hasattr(func, 'ax_callback'): 
+            func.ax_callback(ax) # call ax_callback attached to func only once
             
         if autolabel and ax is not None:
             if len(subset_data_list) > 1:
@@ -1382,8 +1416,9 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             else:
                 ax.set_title(title)
     
-    @deprecated_keyword_alias(columns='cols', kwarg_columns='kwcols')
-    def subplot_array(self, func, *args, cols=None, kwcols={}, plotgroups=None, arraygroups=None, global_selection=None, share_ax=False, autobreak=False, autolabel=True, ax_callback=None, axes=None, fig=None, iter_kwargs={}, **kwargs):
+    @keyword_alias('deprecated', columns='cols', kwarg_columns='kwcols') # deprecated old names
+    @keyword_alias('accepted', groups='plotgroups', paths='plotpaths', subsets='plotsubsets', ax='axes') # make plot() arguments acceptable here 
+    def subplot_array(self, func, *args, cols=None, kwcols={}, plotpaths=None, plotsubsets=None, plotgroups=None, arraygroups=None, global_selection=None, share_ax=False, autobreak=False, autolabel=True, ax_callback=None, axes=None, fig=None, iter_kwargs={}, **kwargs):
         '''
         Plot an "array" of subplots (panels; subplots with several rows and columns) for different selections given in ``arraygroups``;
         Each of the panels consists of several plots for different selections given in ``plotgroups``.
@@ -1415,6 +1450,15 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             Names of data columns that are passed to the plotting function as keyword arguments.
             For example, if ``kwcols={'x': 'col1', 'y':'col2'}``, the plotting function will be called by:
                 ``plotting_function(x=data.t['col1'], y=data.t['col2'])``
+        paths, subsets, groups :
+            aliases of "plotpaths", "plotsubsets" and "plotgroups".
+        plotpaths : str or list of str, optional
+            The full path of a subset (e.g. ``'<group_name>/<subset_name>'``) or a list of paths, for plots in each subplot.
+            If this is given, arguments ``plotsubsets`` and ``plotgroups`` are ignored.
+            The default is None.
+        plotsubsets : str or list of str, optional
+            The names of subsets, or a list of names, for plots in each subplot. 
+            The default is all subsets in the specified group.
         plotgroups : str, optional
             The name of the subset group used to make different plots in each one of the panels. 
             For example, when the plotting function plots curves and ``plotgroups`` consists of 
@@ -1453,6 +1497,8 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         ax_callback : function, optional
             The function to be called as ``ax_callback(ax)`` after plotting in each panel,
             where ``ax`` is the axis object of this panel.
+        ax :
+            alias of "axes".
         axes : list of axes, optional
             The axes of the subplots. 
             The default is None.
@@ -1471,12 +1517,13 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         Raises
         ------
         ValueError
-            - len(plotgroups) >=3: plot array of dim >= 3 not supported.
+            - len(arraygroups) >=3: plot array of dim >= 3 not supported.
             - inferred ``nrow*ncol`` != ``len(axes)`` given
 
         Returns
         -------
         fig : ``matplotlib.figure.Figure``
+            
         axes : list if axes
 
         '''
@@ -1495,12 +1542,16 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         if type(global_selection) in (str, tuple, list, set):
             global_selection = bitwise_all(self.get_subsets(path=global_selection, listalways=True))
 
+        # special case for my scatter()
+        if type(func) == plot.PlotFunction and type(func.func) == plot.Scatter and 'c' in kwarg_columns and 'barlabel' not in kwargs:
+            kwargs['barlabel'] = self.get_labels(kwarg_columns['c'])
+
         if arraygroups is None:
             if axes is None:
                 axes = plt.gca()
             if isinstance(axes, Iterable):
                 axes = axes[0]
-            return self.plot(func(axes), *args, cols=columns, paths=None, subsets=None, groups=plotgroups, autolabel=autolabel, ax=axes, iter_kwargs=iter_kwargs, **kwargs)
+            return self.plot(func(axes), *args, cols=columns, kwcols=kwarg_columns, paths=plotpaths, subsets=plotsubsets, groups=plotgroups, autolabel=autolabel, global_selection=global_selection, ax=axes, iter_kwargs=iter_kwargs, **kwargs)
 
         # get subsets for each panel
         if type(arraygroups) is str:
@@ -1509,7 +1560,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         # if global_selection is not None:
         #     subsets = [[subset & global_selection for subset in subseti] for subseti in subsets]
         if len(subsets) >= 3:
-            raise ValueError('len(plotgroups) >=3: plot array of dim >= 3 not supported. ')
+            raise ValueError('len(arraygroups) >=3: plot array of dim >= 3 not supported. ')
         elif len(subsets) == 2:
             subset_array = [[(xi & yi) for xi in subsets[0]] for yi in subsets[1]]
         else: # len(subsets) == 1
@@ -1549,7 +1600,8 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
                 subset_with_global = subset & global_selection
             else:
                 subset_with_global = subset
-            self.plot(func(ax), *args, cols=columns, kwcols=kwarg_columns, groups=plotgroups, autolabel=True, ax=ax, global_selection=subset_with_global, title=subset.label, iter_kwargs=iter_kwargs, **kwargs)
+            self.plot(func(ax), *args, cols=columns, kwcols=kwarg_columns, paths=plotpaths, subsets=plotsubsets, groups=plotgroups, autolabel=autolabel, ax=ax, global_selection=subset_with_global, title=subset.label, iter_kwargs=iter_kwargs, **kwargs)
+            
             if ax_callback is not None:
                 ax_callback(ax)
         if autolabel and global_selection is not None:
@@ -1713,4 +1765,4 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         return self.col_labels
     
     subsets = subset_data # another name for subset_data
-    
+    plots = subplot_array

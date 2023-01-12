@@ -16,5 +16,6 @@ setup(
         'astropy',
         'matplotlib',
         'numpy',
+        'python>=3.8',
     ]
 )

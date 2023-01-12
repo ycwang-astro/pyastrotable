@@ -83,6 +83,9 @@ class objdict(dict):
         else:
             raise AttributeError("No such attribute: " + name)
 
+class DeprecationError(DeprecationWarning):
+    pass
+
 #%% interactive functions
 
 def pause_and_warn(message=' ', choose='Proceed?', default = 'n', yes_message='', no_message='raise', timeout=None):
@@ -181,12 +184,18 @@ def load_pickle(fname):
 # def save_zip(fname, ext='zip', overwrite=False)
 
 #%% wrappers
-def deprecated_keyword_alias(**aliases):
+def keyword_alias(state='deprecated', /, **aliases):
     '''
-    Returns wrapper for deprecated alias of keyword arguments.
+    Returns wrapper for alias of keyword argument.
 
     Parameters
     ----------
+    state : str
+        POSITIONAL-ONLY argument.
+        Three states: 
+            'accepted' (no warnings)
+            'deprecated' (warnings)
+            'removed' (error)
     **aliases : old = new
         old (deprecated) name and new name
     '''
@@ -198,9 +207,14 @@ def deprecated_keyword_alias(**aliases):
                     if new in kwargs:
                         raise TypeError(f"Both {old} and {new} found in arguments; use {new} only.")
                     kwargs[new] = kwargs.pop(old)
-                    warnings.warn(f"argument '{old}' is deprecated; use '{new}' instead",
-                                  category=FutureWarning, # this is a warning for end-users rather than programmers
-                                  stacklevel=2)
+                    if state == 'accepted':
+                        pass # accepted alias
+                    elif state == 'deprecated':
+                        warnings.warn(f"argument '{old}' is deprecated; use '{new}' instead",
+                                      category=FutureWarning, # this is a warning for end-users rather than programmers
+                                      stacklevel=2)
+                    elif state == 'removed':
+                        raise DeprecationError(f"argument '{old}' is deprecated; use '{new}' instead")
             return f(*args, **kwargs)
         return fnew
     return wrapper

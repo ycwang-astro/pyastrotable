@@ -163,12 +163,29 @@ class Scatter():
         self.autobar = None
         # self.ax = None
     
+    @staticmethod
+    def _decide_autobar(c, x, autobar):
+        # parse c input and decide autobar or not
+        if not autobar or c is None:
+            return False
+        else:
+            try:
+                carr = np.asanyarray(c, dtype=float)
+            except ValueError:
+                return False
+            else:
+                if not (c.shape == (1, 4) or c.shape == (1, 3)) and carr.size == x.size:
+                    return True
+                else:
+                    return False
+    
     def __call__(self, ax):
         # if self.ax is not None and self.ax != ax:
         #     self.params = []
         # self.ax = ax
         def scatter(x, y, s=None, c=None, *, cmap=None, vmin=None, vmax=None, autobar=True, barlabel=None, **kwargs):
-            self.autobar = autobar and (c is not None)
+            self.autobar = self._decide_autobar(c, x, autobar)
+            # self.autobar = autobar and (c is not None and len(c)==len(x))
             param = {key: value for key, value in locals().items() if key not in ('self', 'kwargs')}
             param.update(kwargs)
             self.params.append(param)

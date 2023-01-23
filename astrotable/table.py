@@ -24,6 +24,13 @@ import pickle
 # import re
 # import time
 
+try:
+    import pandas as pd # used to handle pd.DataFrame input
+except ImportError:
+    has_pd = False
+else:
+    has_pd = True
+
 subplot_arrange = {
     1: [1, 1],
     2: [1, 2],
@@ -50,6 +57,19 @@ plot_array_funcs = plot_funcs
 #     }
 
 class FailedToLoadError(Exception):
+    pass
+
+class SubsetNotFoundError(LookupError):
+    def __init__(self, name, kind='path'):
+        if kind == 'path':
+            info = f"'{name}'. Maybe missing/incorrect group name or incorrect subset name?"
+        elif kind in ['subset', 'name']:
+            info = f"'{name}'"
+        else:
+            raise ValueError(f"unknown kind '{kind}'")
+        super().__init__(info)
+        
+class GroupNotFoundError(KeyError):
     pass
 
 class Subset():
@@ -347,6 +367,10 @@ class Data():
             self.path = data
         elif isinstance(data, Table): # got astropy table
             self.t = data
+            self.path = None
+        # for large ascii files, loading with pd abd converting it to astropy.table.Table seems to be faster
+        elif has_pd and type(data) == pd.DataFrame:
+            self.t = Table.from_pandas(data)
             self.path = None
         else: # try to convert to data
             self.t = Table(data)
@@ -1043,48 +1067,81 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         
 
         '''
+        autosearch = False # do not search in other groups unless the user inputs ONLY subsets
+        
         if path is not None:
             if type(path) is str:
                 if listalways:
                     path = [path]
                 else:
-                    return self._get_subset_from_path(path)
+                    return self._get_subset_from_path(path, autosearch=autosearch)
             if isinstance(path, Iterable):
                 subsets = []
                 for p in path:
-                    subsets.append(self._get_subset_from_path(p))
+                    subsets.append(self._get_subset_from_path(p, autosearch=autosearch))
                 return subsets
             else:
                 raise TypeError('path should be str or Iterable')
         else:
             if group is None:
+                autosearch = True
                 group = 'default'
             if type(group) is not str:
                 raise TypeError('group should be a string')
-                
+            
+            if group not in self.subset_groups.keys():
+                raise GroupNotFoundError(group)
+            
             if name is None:
                 name = self.subset_groups[group].keys()
             if type(name) is str:
                 if listalways:
                     name = [name]
                 else:
-                    return self._get_subset_from_path(f'{group}/{name}')
+                    return self._get_subset_from_path(f'{group}/{name}', autosearch=autosearch)
             if isinstance(name, Iterable):
                 subsets = []
                 for n in name:
-                    subsets.append(self._get_subset_from_path(f'{group}/{n}'))
+                    subsets.append(self._get_subset_from_path(f'{group}/{n}', autosearch=autosearch))
                 return subsets
             else:
                 raise TypeError('name should be str or Iterable')
                 
-    def _get_subset_from_path(self, path):
-        # get the subset DATA from path
+    def _get_subset_from_path(self, path, autosearch=False):
+        # get the subset from path
+        # autosearch: search this subset name in other groups if does not found this name in this group
         if '/' not in path:
             group = 'default'
             name = path
         else:
             group, name = path.split('/')
-        subset = self.subset_groups[group][name]
+            
+        if group not in self.subset_groups.keys():
+            raise GroupNotFoundError(group)
+        
+        if name not in self.subset_groups[group].keys():
+            if autosearch:
+                subset = self._get_subset_from_name(name) # search for this name in all groups
+            else:
+                raise SubsetNotFoundError(f"{group}/{name}", kind='path')
+        else:
+            subset = self.subset_groups[group][name]
+        return subset
+    
+    def _get_subset_from_name(self, name, verbose=True):
+        # get subset for name without knowing the name of the group
+        group = None
+        subset = None
+        for group_name, subsets in self.subset_groups.items():
+            if name in subsets.keys():
+                if subset is not None:
+                    raise ValueError(f"subset name is ambiguous: '{name}' found in multiple groups")
+                subset = subsets[name]
+                group = group_name
+        if subset is None:
+            raise SubsetNotFoundError(name, kind='name')
+            
+        if verbose: print(f"Found subset '{name}' in group '{group}'.")
         return subset
     
     def _data_from_subset(self, subsets):

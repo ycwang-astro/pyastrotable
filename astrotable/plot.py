@@ -87,8 +87,8 @@ class PlotFunction():
         # plot function may be called several times in one subplot,
         # but ax_callback should be called ONLY ONCE.
         ax = plt.gca()
-        self._call_with_ax(ax)(*args, **kwargs)
-        return self.ax_callback
+        return self._call_with_ax(ax)(*args, **kwargs)
+        # return self.ax_callback
     
     def in_subplot_array(self, ax): # use in Data.subplot_array
         return self._call_with_ax(ax)

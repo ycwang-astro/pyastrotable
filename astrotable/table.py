@@ -902,6 +902,38 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             raise TypeError('"processes" should be None or int.')
         return Column(result)
     
+    def mask_missing(self, cols=None, missval=None):
+        '''
+        Mask missing values represented by ``missval`` (e.g. -999)
+        for columns ``cols``.
+        
+        For example, ``data.mask_missing(cols='col', missval=-999)``
+        masks all -999 values in column "col", indicating that they are missing.
+
+        Parameters
+        ----------
+        cols : str or list of str, optional
+            Name(s) of the columns to be masked. The default is all columns.
+        missval : optional
+            The value regared as missing value. The default is NaN.
+        '''
+        if cols is None:
+            cols = self.colnames
+        if isinstance(cols, str):
+            cols = (cols,)
+        if missval is None:
+            missval = np.nan
+        
+        if not self.t.masked:
+            self.t = Table(self.t, masked=True, copy=False)  # convert to masked table
+            
+        for col in cols:
+            if np.isnan(missval):
+                mask = np.isnan(self.t[col])
+            else:
+                mask = self.t[col] == missval
+            self.t[col].mask[mask] = True
+    
     #### subsets
     
     def add_subsets(self, *subsets, group=None):
@@ -1857,6 +1889,9 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             return cls(path, format=format, **kwargs)
     
     #### basic methods
+    
+    def __repr__(self):
+        return f"<Data '{self.name}'>"
     
     def __len__(self):
         return len(self.t)

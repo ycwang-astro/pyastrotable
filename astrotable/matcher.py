@@ -11,6 +11,7 @@ import numpy as np
 from astrotable.utils import find_idx
 from astropy.coordinates import SkyCoord
 import astropy.units as u
+from astropy.units import UnitTypeError
 
 class ExactMatcher():
     def __init__(self, value, value1):
@@ -39,9 +40,27 @@ class ExactMatcher():
             self.value = data.t[self.value]
         if type(self.value1) is str:
             self.value1 = data1.t[self.value1]
+        missings = [] # whether the coord is missing
+        not_missing_ids = [] # the indices of those that are not missing
+        for valuei, datai in [[self.value, data], [self.value1, data1]]:
+            if datai.t.masked:
+                missingi = valuei.mask
+            else:
+                missingi = np.full(len(datai), False)
+            not_missing_idi = np.arange(len(datai), dtype=int)[~missingi]
+            missings.append(missingi)
+            not_missing_ids.append(not_missing_idi)
+        
+        self.missing, self.missing1 = missings
+        self.not_missing_id, self.not_missing_id1 = not_missing_ids
     
     def match(self):
-        idx, matched = find_idx(self.value1, self.value)
+        l = len(self.missing)
+        idx = np.full(self.missing.shape, -l-1)
+        matched = np.full(self.missing.shape, False)
+        idx_nm, matched_nm = find_idx(self.value1[~self.missing1], self.value[~self.missing])
+        matched[~self.missing] = matched_nm
+        idx[matched] = self.not_missing_id1[idx_nm[matched_nm]]
         return idx, matched
     
     def __repr__(self):
@@ -74,13 +93,18 @@ class SkyMatcher():
             The default is None.
         unit : astropy.units.core.Unit or list/tuple/array of it
             If astropy.coordinates.SkyCoord object is not given for coord, 
-            this is used to specify the unit of auto-found coord.
+            this is used to specify the unit of coord.
             The default is astropy.units.deg.
         unit1 : astropy.units.core.Unit or list/tuple/array of it
             If astropy.coordinates.SkyCoord object is not given for coord1, 
-            this is used to specify the unit of auto-found coord1.
+            this is used to specify the unit of coord1.
             The default is astropy.units.deg.
            
+        Notes
+        -----
+        The data columns for RA, Dec may already have units (e.g. ``data.t['RA'].unit``).
+        In this case, any input for ``unit`` or ``unit1`` is ignored, and the units recorded
+        in the columns are used.
         '''
         self.thres = thres
         self.coord = coord
@@ -94,40 +118,70 @@ class SkyMatcher():
         ra_names = np.array(['ra', 'RA'])
         dec_names = np.array(['DEC', 'Dec', 'dec'])
         coords = []
+        missings = [] # whether the coord is missing
+        not_missing_ids = [] # the indices of those that are not missing
         for coordi, datai, uniti in [[self.coord, data, self.unit], [self.coord1, data1, self.unit1]]:
-            if coordi is None:
-                found_ra = np.isin(ra_names, datai.colnames)
-                if not np.any(found_ra):
-                    raise KeyError(f'RA for {datai.name} not found.')
-                self.ra_name = ra_names[np.where(found_ra)][0]
-                ra = datai.t[self.ra_name]
-
-                found_dec = np.isin(dec_names, datai.colnames)
-                if not np.any(found_dec):
-                    raise KeyError(f'Dec for {datai.name} not found.')
-                self.dec_name = dec_names[np.where(found_dec)][0]
-                dec = datai.t[self.dec_name]
-                coords.append(SkyCoord(ra=ra, dec=dec, unit=uniti))
-                if verbose: print(f"Data {datai.name}: found RA name '{self.ra_name}' and Dec name '{self.dec_name}'.")
+            if coordi is None or isinstance(coordi, str):
+                if coordi is None: # auto decide ra, dec
+                    found_ra = np.isin(ra_names, datai.colnames)
+                    if not np.any(found_ra):
+                        raise KeyError(f'RA for {datai.name} not found.')
+                    self.ra_name = ra_names[np.where(found_ra)][0]
+                    ra = datai.t[self.ra_name]
+    
+                    found_dec = np.isin(dec_names, datai.colnames)
+                    if not np.any(found_dec):
+                        raise KeyError(f'Dec for {datai.name} not found.')
+                    self.dec_name = dec_names[np.where(found_dec)][0]
+                    dec = datai.t[self.dec_name]
+                    
+                    if verbose: print(f"Data {datai.name}: found RA name '{self.ra_name}' and Dec name '{self.dec_name}'.")
             
-            elif type(coordi) is str:
-                self.ra_name, self.dec_name = coordi.split('-')
-                ra = datai.t[self.ra_name]
-                dec = datai.t[self.dec_name]
-                coords.append(SkyCoord(ra=ra, dec=dec, unit=uniti))
+                else: # type(coordi) is str:
+                    self.ra_name, self.dec_name = coordi.split('-')
+                    ra = datai.t[self.ra_name]
+                    dec = datai.t[self.dec_name]
+                
+                # check missing values for ra and dec
+                if datai.t.masked:
+                    missingi = ra.mask | dec.mask
+                else:
+                    missingi = np.full(len(datai), False)
+                not_missing_idi = np.arange(len(datai), dtype=int)[~missingi]
+                
+                try:
+                    coordi = SkyCoord(ra=ra[~missingi], dec=dec[~missingi], unit=uniti)
+                except UnitTypeError as e:
+                    info = e.args[0]
+                    which_coor = self.ra_name if 'Longitude' in info else self.dec_name
+                    got_unit =  info.split('set it to ')[-1]
+                    raise UnitTypeError(f"Unrecognized unit for column '{which_coor}': expected units equivalent to 'rad', got {got_unit}"\
+                                        f" Try manually setting {datai.__repr__()}.t['{which_coor}'].unit") from e
+                except:
+                    raise
             
             elif type(coordi) is SkyCoord:
                 self.ra_name, self.dec_name = None, None
-                coords.append(coordi)
+                coordi = coordi
             
             else:
-                raise TypeError(f"Unsupported type for coord/coord1: '{type(coordi)}'")
+                raise TypeError(f"Unsupported type for coord/coord1: expected str or astropy.coordinates.SkyCoord, got {type(coordi)}")
+                
+            coords.append(coordi)
+            missings.append(missingi)
+            not_missing_ids.append(not_missing_idi)
         
         self.coord, self.coord1 = coords
+        self.missing, self.missing1 = missings
+        self.not_missing_id, self.not_missing_id1 = not_missing_ids
         
     def match(self):
-        idx, d2d, d3d = self.coord.match_to_catalog_sky(self.coord1)
-        matched = d2d.arcsec < self.thres
+        l = len(self.missing)
+        idx = np.full(self.missing.shape, -l-1)
+        matched = np.full(self.missing.shape, False)
+        idx_nm, d2d, d3d = self.coord.match_to_catalog_sky(self.coord1)
+        idx[~self.missing] = self.not_missing_id1[idx_nm]
+        matched[~self.missing] = d2d.arcsec < self.thres
         return idx, matched
     
     def explore(self, data, data1):

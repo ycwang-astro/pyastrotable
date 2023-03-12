@@ -135,7 +135,7 @@ class SkyMatcher():
                     self.dec_name = dec_names[np.where(found_dec)][0]
                     dec = datai.t[self.dec_name]
                     
-                    if verbose: print(f"Data {datai.name}: found RA name '{self.ra_name}' and Dec name '{self.dec_name}'.")
+                    if verbose: print(f"[SkyMatcher] Data {datai.name}: found RA name '{self.ra_name}' and Dec name '{self.dec_name}'.")
             
                 else: # type(coordi) is str:
                     self.ra_name, self.dec_name = coordi.split('-')
@@ -163,6 +163,9 @@ class SkyMatcher():
             elif type(coordi) is SkyCoord:
                 self.ra_name, self.dec_name = None, None
                 coordi = coordi
+                
+                missingi = np.full(len(datai), False)
+                not_missing_idi = np.arange(len(datai), dtype=int)[~missingi]
             
             else:
                 raise TypeError(f"Unsupported type for coord/coord1: expected str or astropy.coordinates.SkyCoord, got {type(coordi)}")

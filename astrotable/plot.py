@@ -9,7 +9,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 from functools import wraps
-from inspect import signature
+from inspect import signature, isfunction
 from astrotable.utils import objdict
 
 Axes = matplotlib.axes.Axes
@@ -144,6 +144,20 @@ def plotFunc(f):
     '''
     return PlotFunction(f, input_ax=False)
 
+def plotFuncAuto(f):
+    # automatically select plotFunc or plotFuncAx (or nothing to be done)
+    if isinstance(f, PlotFunction):
+        return f
+    try: # what f(ax)(...) should be like
+        # _, _temp_ax = plt.subplots()
+        _f = f(Axes) # TODO (not solved): f may do something when calling this
+        assert callable(_f)
+    except:
+        return plotFunc(f)
+    else:
+        return plotFuncAx(f)
+        
+
 #%% axis callbacks
 def colorbar(ax):
     # TODO: automatically detect and add a colorbar
@@ -192,48 +206,50 @@ class Scatter():
         return scatter
     
     def ax_callback(self, ax):
-        if self.autobar: # decide colorbar information
-            # the general parameters for the whole plot
-            cs = []
-            barinfo = objdict(
-                vmin = None,
-                vmax = None,
-                barlabel = None,
-                cmap = None)
-            
-            for param in self.params:
-                for name in ['vmin', 'vmax', 'barlabel', 'cmap']: # check consistency for different calls
-                    if barinfo[name] is None:
-                        barinfo[name] = param[name]
-                    elif barinfo[name] != param[name]:
-                        raise ValueError(f'colorbar cannot be generated due to inconsistency of "{name}": {barinfo[name]} != {param[name]}')
-                    
-                cs.append(param['c'])
-            
-            # decide vmin, vmax
-            if barinfo.vmin is None:
-                barinfo.vmin = min([np.min(c) for c in cs])
-            if barinfo.vmax is None:
-                barinfo.vmax = max([np.max(c) for c in cs])
-            
-            param_exclude = ['cmap', 'vmin', 'vmax', 'autobar', 'barlabel']
-            color_param_keys = ['vmin', 'vmax', 'cmap']
-            for param in self.params:
-                param = {key: value for key, value in param.items() if key not in param_exclude}
-                colorparams = {key: value for key, value in barinfo.items() if key in color_param_keys}
-                s = ax.scatter(**param, **colorparams)
-            
-            # make colorbar
-            cax = plt.colorbar(s, ax=ax)
-            cax.set_label(barinfo.barlabel)
-            
-        else:
-            param_exclude = ['autobar', 'barlabel']
-            for param in self.params:
-                param = {key: value for key, value in param.items() if key not in param_exclude}
-                ax.scatter(**param)
+        try:
+            if self.autobar: # decide colorbar information
+                # the general parameters for the whole plot
+                cs = []
+                barinfo = objdict(
+                    vmin = None,
+                    vmax = None,
+                    barlabel = None,
+                    cmap = None)
                 
-        self.params = []
+                for param in self.params:
+                    for name in ['vmin', 'vmax', 'barlabel', 'cmap']: # check consistency for different calls
+                        if barinfo[name] is None:
+                            barinfo[name] = param[name]
+                        elif barinfo[name] != param[name]:
+                            raise ValueError(f'colorbar cannot be generated due to inconsistency of "{name}": {barinfo[name]} != {param[name]}')
+                        
+                    cs.append(param['c'])
+                
+                # decide vmin, vmax
+                if barinfo.vmin is None:
+                    barinfo.vmin = min([np.min(c) for c in cs])
+                if barinfo.vmax is None:
+                    barinfo.vmax = max([np.max(c) for c in cs])
+                
+                param_exclude = ['cmap', 'vmin', 'vmax', 'autobar', 'barlabel']
+                color_param_keys = ['vmin', 'vmax', 'cmap']
+                for param in self.params:
+                    param = {key: value for key, value in param.items() if key not in param_exclude}
+                    colorparams = {key: value for key, value in barinfo.items() if key in color_param_keys}
+                    s = ax.scatter(**param, **colorparams)
+                
+                # make colorbar
+                cax = plt.colorbar(s, ax=ax)
+                cax.set_label(barinfo.barlabel)
+                
+            else:
+                param_exclude = ['autobar', 'barlabel']
+                for param in self.params:
+                    param = {key: value for key, value in param.items() if key not in param_exclude}
+                    ax.scatter(**param)
+        
+        finally:
+            self.params = []
 
 scatter = plotFuncAx(Scatter())    
 

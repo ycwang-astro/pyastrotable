@@ -153,6 +153,11 @@ class Subset():
             - The attribute ``expression`` will be automatically set if it is None;
             - The attribute ``label`` will be set to ``name`` if it is None; strings will be replaced 
               according to the mapping of dict ``data.col_labels``.
+              
+        If the input/evaluation of ``selection`` is/results in a masked (boolean) array, the masked elements 
+        are always filled with False (which means that they do NOT belong to this subset).
+        This often happens when ``selection`` is calculated from a masked column of the table.
+        The final ``selection`` after executing the ``eval_`` method is never a masked array.
 
         '''
         if name is not None and '/' in name:
@@ -219,7 +224,7 @@ class Subset():
             return t[column] == value # the boolean array
         name = f'{column}={value}'
         expression = name
-        label = value if type(value) in [str, np.str_] else f'{column}$=${value}'
+        label = value if type(value) in [str, np.str_] else f'{column}$=$' + '$\\mathrm{' + f'{value}' + '}$'
 
         name = Subset._remove_slash(name)
         return cls(selection, name=name, expression=expression, label=label)
@@ -279,7 +284,7 @@ class Subset():
                 # except NameError as e:
                 #     raise KeyError(e.name)
                 except Exception as e:
-                    raise FailedToEvaluateError(f"Auto-generated expression cannot be evaluated: ({self.selection}). Try other methods to specify a subset.") from e
+                    raise FailedToEvaluateError(f"Auto-generated expression cannot be evaluated: ({self.selection}). Check your input (see above for error) or try other methods to specify a subset.") from e
                 except:
                     raise
                 
@@ -288,10 +293,18 @@ class Subset():
                 raise ValueError(f'length of array should be {len(data)}, got {len(self.selection)}.')
             if self.expression is None: 
                 self.expression = '<array>'
-            self.selection = np.array(self.selection).astype(bool)
+            if not isinstance(self.selection, np.ndarray):
+                self.selection = np.array(self.selection)
+                # else: if it is masked, keep it masked (otherwise np.array(self.selection) will get its data only)
+            if self.selection.dtype != bool:
+                self.selection = self.selection.astype(bool)
 
         else:
             raise TypeError(f"keyword argument should be function, array-like object or string, got '{type(self.selection)}'.")
+
+        # directly fill masked to False (this makes a difference when using e.g. __or__, __invert__)
+        if np.ma.is_masked(self.selection):
+            self.selection = self.selection.filled(False) # IMPORTANT: Masked elements do NOT belong to this subset!
 
         # get name
         if self.name is None:
@@ -363,7 +376,10 @@ class Subset():
     def __array__(self):
         if not hasattr(self.selection, 'dtype') or self.selection.dtype != bool: #not isinstance(self.selection, Iterable):
             raise RuntimeError('Selection should be a boolean array. Maybe forgot to run eval_()?')
-        return self.selection
+        if np.ma.is_masked(self.selection): # this never happens after I directly fill masked to False. This is kept to handle instances of old versions.
+            return self.selection.filled(False) # IMPORTANT: Masked elements do NOT belong to this subset!
+        else:
+            return self.selection
     
     def __len__(self):
         # this is actually (and should be) the same as len(data).
@@ -763,6 +779,50 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         
         return merged_subset_groups
     
+    @staticmethod
+    def _decide_missing_value(col):
+        # decide the value representin missing values
+        # refer to https://numpy.org/doc/stable/reference/generated/numpy.dtype.kind.html#numpy.dtype.kind
+        kind = col.dtype.kind
+        if np.ma.is_masked(col):
+            col = col[~col.mask]
+            
+        miss = None
+        # TODO: below
+        if kind in 'b': # boolean
+            pass
+        elif kind in 'i': # signed int
+            miss = -99
+            while np.min(col) < miss/9:
+                miss = (miss - 1)*10 + 1
+        elif kind in 'u': # unsigned int
+            miss = 99
+            while np.max(col) > miss/9:
+                miss = (miss + 1) * 10 - 1
+        elif kind in 'f': # float
+            miss = np.nan
+        elif kind in 'c': # complex float
+            pass
+        elif kind in 'm': # timedelta
+            pass
+        elif kind in 'M': # datetime
+            pass
+        elif kind in 'O': # object
+            miss = 'N/A'
+        elif kind in 'S': # (byte-)string
+            pass
+        elif kind in 'U': # Unicode
+            n = col.dtype.itemsize / 4
+            if n == 1:
+                return '?'
+            elif n == 2:
+                return 'NA'
+            else:
+                return 'N/A'
+        elif kind in 'V': # void
+            pass
+        return miss
+    
     def merge(self, depth=-1, keep_unmatched=[], merge_columns={}, ignore_columns={}, outname=None, keep_subsets=False, verbose=True):
         '''
         Merge all data objects that are matched to this data.
@@ -876,10 +936,13 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             
             if data1.name in keep_unmatched: # keep unmatched
                 if verbose: print(f'[merge] entries with no match for {data1.name} is kept.')
-                idx[~data1_matched] = 0
+                idx[~data1_matched] = 0 # TODO: DANGER: The masked "data" will be valid values, i.e. the value on the first row! These may emerge when using e.g. np.array, plt.hist2d (which uses np.histogram2d).
                 data1_table = Table(data1_table, masked=True)
                 data1_matched_table = data1_table[idx]
                 for c in data1_matched_table.columns:
+                    miss_val = Data._decide_missing_value(data1_matched_table[c])
+                    if miss_val is not None:
+                        data1_matched_table[c][~data1_matched] = miss_val
                     data1_matched_table[c].mask[~data1_matched]=True
                 data1_matched_table = data1_matched_table[matched]
                 
@@ -1885,6 +1948,8 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
                 axes = plt.gca()
             if isinstance(axes, Iterable):
                 axes = axes[0]
+            if fig is None:
+                fig = axes.figure
             ret = self.plot(func(axes), *args, cols=columns, kwcols=kwarg_columns, paths=plotpaths, subsets=plotsubsets, groups=plotgroups, autolabel=autolabel, global_selection=global_selection, ax=axes, iter_kwargs=iter_kwargs, **kwargs)
             self.plot_returns.append(ret)
         
@@ -2126,7 +2191,8 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
     #### basic methods
     
     def __repr__(self):
-        return f"<Data '{self.name}'>"
+        name = f"'{self.name}'" if self.name is not None else 'without name'
+        return f"<Data {name}>"
     
     def __len__(self):
         return len(self.t)
@@ -2153,6 +2219,9 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
     @property
     def labels(self): # alternative name for col_labels
         return self.col_labels
+    
+    def df(self, index=None, use_nullable_int=True): # convenient method to get the pandas DataFrame from data
+        return self.t.to_pandas(index=index, use_nullable_int=use_nullable_int)
     
     subsets = subset_data # another name for subset_data
     subplot_array = plots

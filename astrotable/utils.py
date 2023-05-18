@@ -46,6 +46,33 @@ def find_idx(array, values):
     idx[not_found] = -l-1
     return idx, found
 
+def find_eq(array, values):
+    '''
+    Return an boolean array indicating whether each row in ``values`` is 
+    equal to each row in ``array``.
+
+    Parameters
+    ----------
+    array : array of shape (N1, M)
+        .
+    values : array of shape (N2, M)
+        .
+
+    Returns
+    -------
+    eq : boolean array of shape (N2, N1)
+        An array where the ``eq[i, j]`` element is ``np.all(values[i] == array[j])``.
+
+    '''
+    eq = np.all(values[:, np.newaxis, :] == array, axis=2)
+    # same as [[np.all(a[i] == b[j]) for j in range(array.shape[0])] for i in range(values.shape[0])]
+    return eq
+
+# # testing find_eq
+# for i in range(values.shape[0]): 
+#     for j in range(array.shape[0]): 
+#         assert find_eq(array, values)[i, j] == np.all(values[i] == array[j])
+
 def grid(x, y, flat=False):
     if flat:
         xx = [xi for yi in y for xi in x]

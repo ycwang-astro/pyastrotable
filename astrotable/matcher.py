@@ -8,7 +8,7 @@ Built-in matchers.
 """
 
 import numpy as np
-from astrotable.utils import find_idx
+from astrotable.utils import find_idx, find_eq
 from astropy.coordinates import SkyCoord
 import astropy.units as u
 from astropy.units import UnitTypeError

@@ -15,7 +15,7 @@ import astrotable.plot as plot
 import warnings
 import multiprocessing as mp
 from collections.abc import Iterable
-from collections import OrderedDict
+from collections import OrderedDict, Counter
 import inspect
 from itertools import repeat, chain
 import os
@@ -23,7 +23,8 @@ import zipfile
 import pickle
 from copy import deepcopy
 import json
-# import re
+import re
+from keyword import iskeyword
 # import time
 
 try:
@@ -267,26 +268,30 @@ class Subset():
                 self.selection = np.full(len(data), True)
             
             else:
-                # check string: avoid error if the string contains something like "self", "data" but are not real column names
-                names = list(chain(locals(), globals()))
-                for name in names:
-                    if name in ['np', 'os']:
-                        continue
-                    if name in self.selection and name not in data.colnames:
-                        raise KeyError(name)
+                self.selection = data.eval(self.selection)
                 
-                for colname in data.colnames: # replace colnames to expression
-                    self.selection = self.selection.replace(colname, f"data.t['{colname}']")
+                ### old implementation below:
+                # # check string: avoid error if the string contains something like "self", "data" but are not real column names
+                # names = list(chain(locals(), globals()))
+                # for name in names:
+                #     if name in ['np', 'os']:
+                #         continue
+                #     if name in self.selection and name not in data.colnames:
+                #         raise KeyError(name)
                 
-                try:
-                    print('[subset] evaluating', self.selection)
-                    self.selection = eval(self.selection)
-                # except NameError as e:
-                #     raise KeyError(e.name)
-                except Exception as e:
-                    raise FailedToEvaluateError(f"Auto-generated expression cannot be evaluated: ({self.selection}). Check your input (see above for error) or try other methods to specify a subset.") from e
-                except:
-                    raise
+                # for colname in data.colnames: # replace colnames to expression
+                #     self.selection = self.selection.replace(colname, f"data.t['{colname}']")
+                
+                # try:
+                #     print('[subset] evaluating', self.selection)
+                #     self.selection = eval(self.selection)
+                # # except NameError as e:
+                # #     raise KeyError(e.name)
+                # except Exception as e:
+                #     raise FailedToEvaluateError(f"Auto-generated expression cannot be evaluated: ({self.selection}). Check your input (see above for error) or try other methods to specify a subset.") from e
+                # except:
+                #     raise
+                ### end
                 
         elif isinstance(self.selection, Iterable):
             if len(self.selection) != len(data):
@@ -462,7 +467,9 @@ class Data():
                 col = self.t[colname]
                 if 'src' not in col.meta.keys():
                     col.meta['src'] = self.name
-                    col.meta['src_detail'] = f'"{self.path}"'
+                    col.meta['src_detail'] = f'Loaded "{self.path}"'
+                    col.meta['set_by_user'] = False # whether the value of this column is modified by the user. 
+                    # TODO: CAUTION: modification can only be detected when using data[] instead of data.t[]
         else:
             pass # TODO: not safe to set metadata for other input format, as they may have their own metadata
         
@@ -1129,6 +1136,73 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         else:
             raise TypeError('"processes" should be None or int.')
         return Column(result)
+    
+    def _get_colnames_variable(self):
+        '''
+        Get the colnames that can be regarded as names, 
+        and do not have duplicates (no other column has the same name).
+        '''
+        colname_counts = Counter(self.colnames)
+        self.colnames_as_variables = []
+        for colname, count in colname_counts.items():
+            if count == 1 and colname.isidentifier() and not iskeyword(colname):
+                self.colnames_as_variables.append(colname)
+        return self.colnames_as_variables
+    
+    def eval(self, expression, to_col=None):
+        '''
+        Evaluate the value with an expression.
+        
+        In the expression, the columns of the table can be referred to with:
+            - The name of the column, if the name can be regarded as a Python variable name, 
+              and they do not coincidence with names in the local/global namespace.
+            - ``$(<column name>)``.
+            - ``self['<column name>']``.
+        
+        The Data object itself can be referred to as ``self``.
+
+        Parameters
+        ----------
+        expression : str
+            The expression to be evaluated.
+        to_col : str, optional
+            Sets ``data[to_col]`` to the evaluated values of the expression.
+            This is preferred to using ``data['name'] = data.eval(...)``, 
+            because the information of the expression is added to the metadata with ``data.eval(..., to_col='name')``.
+            The default is None.
+
+        Returns
+        -------
+        result : 
+            The result of the evaluation.
+        '''
+        self._get_colnames_variable()
+        for _colname in self.colnames_as_variables:
+            _existing_names = []
+            if _colname not in locals() and _colname not in globals():
+                locals()[_colname] = self[_colname]
+            elif _colname in expression and f"$({_colname})" not in expression:
+                _existing_names.append(_colname)
+            if _existing_names:
+                warnings.warn(f'Column names {_existing_names} coincidence with existing names in the local/global namespace, '\
+                              'thus are not interpretated as column names. '\
+                              "Consider refering column names with $(column name).")
+        _eval_expression = re.sub(
+            r"\$\((.*?)\)",  # replace $(...)
+            lambda match: f"self['{match.group(1)}']", # to self['...']
+            expression,
+            )
+        try:
+            result = eval(_eval_expression)
+        except SyntaxError as e:
+            raise SyntaxError('invalid syntax (are you trying to directly refer to unsupported column names?)') from e
+        except NameError as e:
+            raise ValueError(f"Unrecognized name '{e.name}'. Did you misspell a column name?") from e
+            
+        if to_col is not None:
+            self[to_col] = result
+            self[to_col].meta['src_detail'] += f' with expr "{expression}"'
+        return result
     
     def mask_missing(self, cols=None, missval=None, verbose=True):
         '''
@@ -2210,10 +2284,22 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         
         # warnings.warn('Although supported, it is not suggested to set items of the table by directly subscripting Data objects. Use e.g. data.t[index] instead of data[index].')
         new = isinstance(item, str) and item not in self.colnames
-        self.t[item] = value
         if new:
+            self.t[item] = value
             self.t[item].meta['src'] = 'user-added'
-            self.t[item].meta['src_detail'] = ''
+            self.t[item].meta['src_detail'] = 'set by user'
+            self.t[item].meta['set_by_user'] = True
+            self.t[item].description = ''
+            self.t[item].unit = ''
+        else: # modifying existing column?
+            # meta not modified; description and unit cleared
+            old_meta = self.t[item].meta
+            self.t[item] = value 
+            self.t[item].meta = old_meta
+            self.t[item].description = ''
+            self.t[item].unit = ''
+            self.t[item].meta['src_detail'] += '; modified by user'
+            self.t[item].meta['set_by_user'] = True
         
     #### alternative names
     @property

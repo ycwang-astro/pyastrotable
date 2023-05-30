@@ -16,6 +16,7 @@ setup(
         'astropy',
         'matplotlib',
         'numpy',
-        'python>=3.8',
-    ]
+        # 'python>=3.8',
+    ],
+    python_requires='>=3.8',
 )

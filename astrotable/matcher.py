@@ -215,4 +215,4 @@ class SkyMatcher():
         return d2d.arcsec
         
     def __repr__(self):
-        return f'SkyMatcher with thres={self.thres}'
+        return f'<SkyMatcher with thres={self.thres}>'

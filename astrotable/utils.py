@@ -133,7 +133,7 @@ def pause_and_warn(message=' ', choose='Proceed?', default = 'n', yes_message=''
     
     if isinstance(message, Exception):
         message = str(type(message)).replace('<class \'','').replace('\'>', '')+': '+'. '.join(message.args)
-    warnings.warn(message)
+    warnings.warn(message, stacklevel=3)
     print(message)
     
     question = '{} {} >>> '.format(choose, '[y]/n' if default == 'y' else 'y/[n]')

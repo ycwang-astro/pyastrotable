@@ -259,7 +259,14 @@ def plot(ax):
 
 @plotFuncAx
 def hist(ax):
-    return ax.hist
+    @wraps(ax.hist)
+    def _hist(x, *args, **kwargs):
+        # Masked arrays are not supported by plt.hist.
+        # let us consider this here.
+        if np.ma.is_masked(x):
+            x = x[~x.mask]
+        return ax.hist(x, *args, **kwargs)
+    return _hist
 
 @plotFuncAx
 def hist2d(ax):

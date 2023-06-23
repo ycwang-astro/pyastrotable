@@ -10,8 +10,9 @@ Main tools to store, operate and visualize data tables.
 import matplotlib.pyplot as plt
 import numpy as np
 from astropy.table import Column, Table, hstack
-from astrotable.utils import objdict, save_pickle, load_pickle, keyword_alias, bitwise_all
+from astrotable.utils import objdict, save_pickle, load_pickle, keyword_alias, bitwise_all, pause_and_warn
 import astrotable.plot as plot
+import astrotable
 import warnings
 import multiprocessing as mp
 from collections.abc import Iterable
@@ -303,6 +304,8 @@ class Subset():
                 # else: if it is masked, keep it masked (otherwise np.array(self.selection) will get its data only)
             if self.selection.dtype != bool:
                 self.selection = self.selection.astype(bool)
+            
+            self.selection = self.selection.copy()
 
         else:
             raise TypeError(f"keyword argument should be function, array-like object or string, got '{type(self.selection)}'.")
@@ -323,6 +326,10 @@ class Subset():
             self.label = self.name
             
         # replace colname with label
+        # TODO: this is not robust. This should be used to modify the labels for subset
+        # initialized by Subset.by_range and Subset.by_value, because they do not know the labels during
+        # initialization. If a subset is initialized by Subset() and label is given by the user, 
+        # it should not be modified.
         for colname, labelstr in data.col_labels.items():
             self.label = self.label.replace(colname, labelstr)
     
@@ -446,14 +453,15 @@ class Data():
             self.path = data
         elif isinstance(data, Table): # got astropy table
             self.t = data
-            self.path = None
+            self.path = '(initialized from Table)'
         # for large ascii files, loading with pd abd converting it to astropy.table.Table seems to be faster
         elif has_pd and type(data) == pd.DataFrame:
             self.t = Table.from_pandas(data)
-            self.path = None
+            self.path = '(initialized from DataFrame)'
         else: # try to convert to data
             self.t = Table(data)
-            self.path = None
+            self.path = f'(initalized from a {type(data)} object)'
+        self.meta['path'] = self.path
          
         # basic properties
         self.name = name
@@ -495,6 +503,10 @@ class Data():
     @property
     def colnames(self):
         return self.t.colnames
+    
+    @property
+    def meta(self):
+        return self.t.meta
     
     #### matching & merging 
     def match(self, data1, matcher, verbose=True, replace=False):
@@ -830,7 +842,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             pass
         return miss
     
-    def merge(self, depth=-1, keep_unmatched=[], merge_columns={}, ignore_columns={}, outname=None, keep_subsets=False, verbose=True):
+    def merge(self, depth=-1, keep_unmatched=[], merge_columns={}, ignore_columns={}, outname=None, keep_subsets=False, matchinfo_subset=False, verbose=True):
         '''
         Merge all data objects that are matched to this data.
         
@@ -868,6 +880,10 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             The default is None.
         keep_subsets : bool, optional
             Whether the subsets of the data are kept and merged. The default is False.
+        matchinfo_subset : bool, optional
+            If ``keep_unmatched != []``, whether to add a subset 'matched/<this_data_name>/<name_of_data_matched_to_this_data>',
+            indicating whether each row can be matched to that data.
+            The default is False.
         verbose : bool, optional
             Whether to show more information on merging. The default is True.
 
@@ -888,11 +904,16 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         '''
         if type(keep_unmatched) is str:
             keep_unmatched = [keep_unmatched]
+        elif keep_unmatched is True:
+            keep_unmatched, _, _ = self._match_tree(depth=depth, silent=True)
+            keep_unmatched = keep_unmatched[1:]
+            if verbose: print(f'[merge] `keep_unmatched` set to all subsets matched to {self}: {keep_unmatched}')
         
         matched = np.full((len(self),), True) # whether a record in self is matched to ALL the child data
         data1_matched_tables = []
         unnamed_count = 0
         data_names = [self.name]
+        data_metas = {self.name: self.meta}
         data_subset_groups = [] # list of cutted subset groups for each data
         
         merged_matchinfo = self.merge_matchinfo(depth=depth)
@@ -907,8 +928,10 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             if data1.name is None:
                 unnamed_count += 1
                 data_names.append(str(unnamed_count))
+                data_metas[str(unnamed_count)] = data1.meta
             else:
                 data_names.append(data1.name)
+                data_metas[data1.name] = data1.meta
                 
         if outname is None:
             outname = 'match_' + '_'.join(data_names)
@@ -927,6 +950,8 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         if keep_subsets:
             subset_groups = Data._cut_subset_groups(self.subset_groups, matched, outname)
             data_subset_groups.append(subset_groups)
+        
+        subsets_to_be_added = [] # will be used if matchinfo_subset
         
         # cut data matched to me
         for matchinfo in merged_matchinfo:
@@ -957,6 +982,13 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
                     subset_groups = Data._cut_subset_groups(data1.subset_groups, idx, outname)
                     subset_groups = Data._mask_subset_groups(subset_groups, ~data1_matched)
                     subset_groups = Data._cut_subset_groups(subset_groups, matched, outname)
+                    
+                if matchinfo_subset:
+                    subsets_to_be_added.append(Subset(
+                        data1_matched, 
+                        name=data1.name, 
+                        expression=f"<'{data1.name}' matched to '{self.name}'>",
+                        label=f"'{data1.name}' matched to '{self.name}'"))
 
             else: # do not keep unmatched
                 data1_matched_table = data1_table[idx[matched]]
@@ -972,13 +1004,40 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         # merge table and get data
         matched_table = hstack([data] + data1_matched_tables, table_names=data_names)
         matched_data = Data(matched_table, name=outname)
+        matched_data.meta['path'] = '(merged data)'
         
         # merge subsets
         if keep_subsets:
             merged_subset_groups = Data._merge_subset_groups(data_subset_groups, data_names)
             matched_data.subset_groups = merged_subset_groups
         
+        # add subsets if matchinfo_subset
+        if matchinfo_subset:
+            group = f'matched/{self.name}'
+            if group in matched_data.subset_groups:
+                raise RuntimeError(f"A subset group named '{group}' already exists.")
+            matched_data.add_subsets(*subsets_to_be_added, group=group)
+        
         if verbose: print('[merge] merged: ' + ', '.join(data_names))
+        
+        ## generate data meta
+        assert list(data_metas.keys()) == data_names
+        matched_names, _, tree_str = self._match_tree(depth=depth, silent=True)
+        assert data_names == matched_names
+        merging = OrderedDict({ # detailed information for merging
+            'notes': 'This is a table merged from several tables. The merging information is recorded below.'\
+                     'The metadata for merged datasets are recorded in "metas".',
+            'options': dict(
+                depth=depth,
+                keep_unmatched=keep_unmatched,
+                keep_subsets=keep_subsets,
+                matchinfo_subset=matchinfo_subset,
+                ),
+            'tree': tree_str, # the match tree of the base data
+            'merged': data_names, # names of the data merged
+            'metas': data_metas, # metas for the data merged
+            })
+        matched_data.meta['merging'] = merging
         
         return matched_data
     
@@ -1045,7 +1104,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         self.match(data1=data1, matcher=matcher, verbose=verbose)
         return self.merge(keep_unmatched=keep_unmatched, merge_columns=merge_columns, ignore_columns=ignore_columns, outname=outname, verbose=verbose)
     
-    def _match_tree(self, depth=-1, detail=True, matched_names=[], matched_ids=[], indent='', matcher='base'):
+    def _match_tree(self, depth=-1, detail=True, matched_names=[], matched_ids=[], indent='', matcher='base', tree_str='', silent=False):
         # copy lists to avoid modifying it in-place (which will cause the method to "remember" them!)
         matched_names = matched_names.copy()
         matched_ids = matched_ids.copy()
@@ -1053,21 +1112,25 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         # print this name
         matcher = '' if not detail else f' [{matcher}]'
         name = 'Unnamed' if self.name is None else self.name
-        if id(self) in matched_ids:
-            print(f'{indent}({name}){matcher}')
-            return matched_names, matched_ids
+        if id(self) in matched_ids: # this data is already matched 
+            print_str = f'{indent}({name}){matcher}'
+            if not silent: print(print_str)
+            tree_str += print_str + '\n'
+            return matched_names, matched_ids, tree_str # do not expand this anymore
         else:
             matched_names.append(name)
             matched_ids.append(id(self))
-            print(f'{indent}{name}{matcher}')
-        
+            print_str = f'{indent}{name}{matcher}'
+            if not silent: print(print_str)
+            tree_str += print_str + '\n'
+       
         # print data matched to this
         if depth != 0:
             for info in self.matchinfo:
                 data = info.data1
                 matcher = info.matcher
-                matched_names, matched_ids = data._match_tree(depth=depth-1, detail=detail, matched_names=matched_names, matched_ids=matched_ids, indent=indent+':   ', matcher=matcher)
-        return matched_names, matched_ids
+                matched_names, matched_ids, tree_str = data._match_tree(depth=depth-1, detail=detail, matched_names=matched_names, matched_ids=matched_ids, indent=indent+':   ', matcher=matcher, tree_str=tree_str, silent=silent)
+        return matched_names, matched_ids, tree_str
             
     def match_tree(self, depth=-1, detail=True):
         '''
@@ -1149,7 +1212,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
                 self.colnames_as_variables.append(colname)
         return self.colnames_as_variables
     
-    def eval(self, expression, to_col=None):
+    def eval(self, expression, to_col=None, **kwargs):
         '''
         Evaluate the value with an expression.
         
@@ -1170,12 +1233,20 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             This is preferred to using ``data['name'] = data.eval(...)``, 
             because the information of the expression is added to the metadata with ``data.eval(..., to_col='name')``.
             The default is None.
+        **kwargs :
+            If the expression uses some name that is not recognized (e.g. using a user-defined name will result in NameError),
+            you can pass the values of the names here.
+            
+            For example, if you use an expression 'my_function(col) + my_value' (where 'col' is a column name in the data),
+            you can pass ``my_function`` and ``my_value`` by::
+                Data.eval('my_function(col) + my_value', my_function=my_function, my_value=my_value)
 
         Returns
         -------
         result : 
             The result of the evaluation.
         '''
+        locals().update(**kwargs)
         self._get_colnames_variable()
         for _colname in self.colnames_as_variables:
             _existing_names = []
@@ -1197,7 +1268,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         except SyntaxError as e:
             raise SyntaxError('invalid syntax (are you trying to directly refer to unsupported column names?)') from e
         except NameError as e:
-            raise ValueError(f"Unrecognized name '{e.name}'. Did you misspell a column name?") from e
+            raise NameError(f"Unrecognized name '{e.name}'. Check if you have misspelled a column name. If you are using a name defined in your script, consider passing '{e.name}={e.name}' when calling eval().") from e
             
         if to_col is not None:
             self[to_col] = result
@@ -1211,6 +1282,12 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         
         For example, ``data.mask_missing(cols='col', missval=-999)``
         masks all -999 values in column "col", indicating that they are missing.
+        
+        If verbose, the information for the process will be printed. 
+        Note that the printed information indicates the number of elements masked 
+        in this process, rather than the total number of masked elements in the columns.
+        To get the number of unmasked elements in a column, try::
+            print(data.get_subsets('$unmasked/<column_name>'))
 
         Parameters
         ----------
@@ -1242,7 +1319,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             self.t[col].mask[mask] = True
             if verbose:
                 n = len(self)
-                print(f"[mask missing] col '{col}': {n_miss}/{n} ({n_miss/n*100:.2f}%) missing ({missval}).")
+                print(f"[mask missing] col '{col}': {n_miss}/{n} ({n_miss/n*100:.2f}%) masked (value: {missval}).")
     
     #### subsets
     
@@ -1252,6 +1329,10 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         
         A subset refers to a subset (selection) of rows;
         a subset group is a group of subsets.
+        
+        Beware that a subset does not "watch" the changes in the data:
+        once added to the data, it never changes, even if the data changes.
+        If you would like to update your subset, you may add it again to overwrite the old one.
 
         Parameters
         ----------
@@ -1266,10 +1347,14 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             The arguments, i.e. a tuple of subset objects.
             
         '''
+        # TODO: add arg "overwrite=False". if not overwrite, pass existing_names to Subset.eval_ to rename; otherwise, overwrite the subset
         if group is None:
             group = 'default'
+        if group == '$unmasked':
+            raise ValueError("Subset group '$unmasked' is a special group that cannot be modified.")
+            
         elif group not in self.subset_groups.keys():
-            self.subset_groups[group] = {}
+            self.subset_groups[group] = {} # create the new group
         # subset_objects = []
         for subset in subsets:
             subset.eval_(self, self.subset_groups[group].keys())
@@ -1313,6 +1398,9 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         if group_name == 'default':
             raise ValueError("name 'default' is not allowed for new subset groups")
         
+        if group_name == '$unmasked':
+            raise ValueError("Subset group '$unmasked' is a special group that cannot be modified.")
+        
         if group_name in self.subset_groups and not overwrite:
             raise ValueError(f'A subset group with name "{group_name}" already exists.')
         
@@ -1320,6 +1408,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         if len(values) > 10:
             warnings.warn(f'A total of {len(values)} unique values found in column "{column}". This will result in a subset group with a lot of subsets.')
         
+        # TODO: use self.add_subsets (with overwrite=True) [make sure to test the changes before using it!]
         self.subset_groups[group_name] = {}
         for value in values:
             subset = Subset.by_value(column, value)
@@ -1357,10 +1446,14 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         
         if group_name == 'default':
             raise ValueError("name 'default' is not allowed for new subset groups")
-        
+
+        if group_name == '$unmasked':
+            raise ValueError("Subset group '$unmasked' is a special group that cannot be modified.")
+              
         if group_name in self.subset_groups and not overwrite:
             raise ValueError(f'A subset group with name "{group_name}" already exists.')
         
+        # TODO: use self.add_subsets (with overwrite=True) [make sure to test the changes before using it!]
         self.subset_groups[group_name] = {}
         for range_ in ranges:
             subset = Subset.by_range(**{column: range_})
@@ -1378,15 +1471,17 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             Name of the subset group to be cleared. 
             If not specified, all user-defined subsets are deleted.
         '''
-        if group in (None, 'all'):
+        if group in (None, 'all'): # clear all groups
             # print('INFO: subsets reset to default.')
             self.subset_groups = {
                 'default': {'all': self.subset_all}
                 }
-        elif group in ('default',):
+        elif group in ('default',): # clear default group
             self.subset_groups['default'] = {'all': self.subset_all}
-        elif group in self.subset_groups.keys():
+        elif group in self.subset_groups.keys(): # clear a certain group 
             del self.subset_groups[group]
+        elif group in ['$unmasked']: # trying to clear a special group
+            raise ValueError(f"'{group}' is a special group that cannot be cleared")
         else:
             warnings.warn(f"group name '{group}' does not exist, no need to clear")
     
@@ -1395,6 +1490,10 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         Get a subset (or several subsets) given the subset groups, subset names 
         or paths (i.e. ``'<group_name>/<subset_name>'``)
         Different from the ``subset_data`` method, which returns the ``Subset`` objects.
+        
+        Note that a special group (and the subsets in it) is virtual (it does not really "exist"). 
+        Subsets from special groups (including '$unmasked') can only be retrieved with its path
+        (e.g. ``'$unmasked/<column name>'``). Otherwise, a GroupNotFoundError will be raised.
 
         Parameters
         ----------
@@ -1416,11 +1515,42 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         ``astrotable.table.Subset`` or list of ``astrotable.table.Subset``
             The subset or list of subsets specified.
             
+        Special subsets (groups)
+        ------------------------
+        A special subset group is a virtual group that do not actually "exists".
+        This is used to create a (new) subset as if retrieving an existing subset of
+        the data. That means that these (virtual) subsets are 
+        only created when ``get_subsets()`` is called to "retrieve" it, and it is not actually
+        added to the data. If you would like to make it a "normal" subset stored in
+        the ``astrotable.table.Data`` instance, you can use::
+            data.add_subsets(
+                data.get_subsets('<path to the special subset>'),
+                )
+        
+        Recognized special subsets are listed below:
+        
+        - ``$unmasked``. This subset group contains virtual subsets indicating whether the values in
+          a certain column is not masked (i.e., a subset in this group contains rows where the value 
+          for the specified column is not masked). 
+          To get such a subset, simply use::
+              data.get_subsets('$unmasked/<column name>')
+            
+          Note that a new subset is created whenever ``get_subsets()`` is called; 
+          `the old subsets never change even when the mask of the column is changed`. For example::
+              subset0 = data.get_subsets('$unmasked/col1')
+              # changing the mask of column 'col1'
+              subset1 = data.get_subsets('$unmasked/col1')
+              subset0 is not subset1 # True 
+              # NOTE: subset0 is the old subset that does not represent the masking of 'col1' now.
+        
         Examples
         --------
         
 
         '''
+        # (i.e. a special subset group and the virtual subsets therein 
+        # is never remembered by a ``astrotable.table.Data`` instance)
+        
         autosearch = False # do not search in other groups unless the user inputs ONLY subsets
         
         if path is not None:
@@ -1484,6 +1614,9 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             names = path.split('/')
             group, name = '/'.join(names[:-1]), names[-1] # allows '/' in groupname
             
+        if group in ['$unmasked']: # this is a special group
+            return self._get_special_subset(group, name)
+        
         if group not in self.subset_groups.keys():
             raise GroupNotFoundError(group)
         
@@ -1511,6 +1644,22 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             
         if verbose: print(f"[subset] Found subset '{name}' in group '{group}'.")
         return subset
+    
+    def _get_special_subset(self, group, name):
+        if group == '$unmasked': # '$unmasked/<column_name>'
+            if np.ma.is_masked(self[name]):
+                unmasked = ~self[name].mask # here name is a column name
+                # Notes: the '~' operation creates a new array. Consider this: a = np.array((True, True)); b = ~a; a[0] = not a[0]; print(np.all(b == ~a)) # False
+            else:
+                unmasked = np.full(len(self), True)
+            subset = Subset(unmasked, 
+                            name=f'$unmasked({name})', 
+                            expression=f"~self['{name}'].mask",
+                            label=self.get_labels(name)+' unmasked')
+            subset.eval_(self)
+            return subset
+        else:
+            raise ValueError(f"unrecognized special subset group: '{group}'")
     
     def _data_from_subset(self, subsets):
         '''
@@ -1540,13 +1689,17 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
     def subset_data(self, path=None, name=None, group=None):
         '''
         Get a subset (or several subsets) of data given the subset groups, subset names 
-        or paths (i.e. ``'<group_name>/<subset_name>'``)
-        Different from the ``get_subsets`` method, which returns the ``Subset`` objects.
+        or paths (i.e. ``'<group_name>/<subset_name>'``).
+        This is different from the ``get_subsets`` method, which returns the ``Subset`` objects.
+        
+        You may also pass a ``Subset`` object or a list of ``Subset`` objects to the ``path`` parameter,
+        to directly get the data.
 
         Parameters
         ----------
-        path : str or list of str, optional
-            The path or a list of paths.
+        path : Subset OR list of Subset OR str OR list of str, optional
+            A Subset object or a list of Subset objects,
+            or the path or a list of paths.
             If this is given, arguments ``name`` and ``group`` are ignored.
             The default is None.
         name : str or list of str, optional
@@ -1594,7 +1747,15 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         summary = Table(names=['group', 'name', 'size', 'fraction', 'expression', 'label'], 
                         dtype=['str', 'str', 'int', 'float', 'str', 'str']
                         )
-        if group is None:
+        if group is None: # no group specified
+            # add information for special groups
+            summary.add_row(dict(
+                group='$unmasked', name='-',
+                size='-1', fraction=np.nan,
+                expression='<special group of subsets for unmasked elements>',
+                label='-',
+                ))
+            # show all groups
             group = self.subset_groups.keys()
         elif type(group) is str:
             group = [group]
@@ -1826,7 +1987,13 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
                     input_data.append(subset_data.t[column])
             this_kwarg_columns = {}
             for argname in kwarg_columns:
-                this_kwarg_columns[argname] = subset_data.t[kwarg_columns[argname]]
+                argval = kwarg_columns[argname]
+                if isinstance(argval, str):
+                    this_kwarg_columns[argname] = subset_data.t[argval]
+                elif isinstance(argval, (list, tuple)) and all(isinstance(v, str) for v in argval):
+                    this_kwarg_columns[argname] = [subset_data.t[v] for v in argval]
+                else:
+                    raise TypeError(f'expected str or list/tuple of str for values of kwcols, got "{type(argval)}"')
             
             ret = plot_func(*input_data, *args, **this_kwarg_columns, **iter_kwargs, **kwargs)
         
@@ -2099,11 +2266,12 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
     # data when saving and loading "data" (zip) files.
     data_to_save = {
         # attribute name: save method
-        'col_labels': 'pkl',
+        'col_labels': 'json',
         'subset_groups': 'pkl',
         't': 'astropy.table',
-        'name': 'pkl',
-        'matchlog': 'pkl',
+        'name': 'txt',
+        'matchlog': 'json',
+        'meta': 'json',
         }
     table_format = 'fits' # 'asdf' # 'ascii.ecsv'
     table_ext = '.fits' # '.asdf' # '.ecsv'
@@ -2111,6 +2279,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         data_to_save=data_to_save,
         table_format=table_format,
         table_ext=table_ext,
+        package_version=astrotable.__version__,
         )
     
     # old values before save_meta is saved
@@ -2184,11 +2353,24 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
                         fname = attr + '.pkl'
                         with datazip.open(fname, mode='w') as f:
                             pickle.dump(getattr(self, attr), f)
+                    elif method == 'json':
+                        fname = attr + '.json'
+                        with datazip.open(fname, mode='w') as f:
+                            json_str = json.dumps(getattr(self, attr), indent=4)
+                            json_str = bytes(json_str, 'ascii')
+                            f.write(json_str)
+                    elif method == 'txt':
+                        fname = attr + '.txt'
+                        with datazip.open(fname, mode='w') as f:
+                            s = getattr(self, attr)
+                            assert isinstance(s, str), "'txt' mode only for str"
+                            s = s.encode()
+                            f.write(s)
                     else:
                         raise ValueError(f'unrecognized saving method: {method}')
                 
                 # save save_meta
-                with datazip.open('.meta.json', mode='w') as f:
+                with datazip.open('.save_meta.json', mode='w') as f:
                     meta = json.dumps(Data.save_meta, indent=4)
                     meta = bytes(meta, 'ascii')
                     f.write(meta)
@@ -2224,12 +2406,17 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             attrs = {}
             try:
                 with zipfile.ZipFile(path) as datazip:
-                    if '.meta.json' in datazip.namelist():
-                        with datazip.open('.meta.json') as f:
+                    if '.save_meta.json' in datazip.namelist():
+                        with datazip.open('.save_meta.json') as f:
                             save_meta = json.load(f)
                         # locals().update(save_meta)
                         data_to_save, table_ext, table_format = save_meta['data_to_save'], save_meta['table_ext'], save_meta['table_format']
+                    elif '.meta.json' in datazip.namelist(): # the old name
+                        with datazip.open('.meta.json') as f:
+                            save_meta = json.load(f)
+                        data_to_save, table_ext, table_format = save_meta['data_to_save'], save_meta['table_ext'], save_meta['table_format']
                     else:
+                        save_meta = None
                         data_to_save, table_ext, table_format = Data._old_data_to_save, Data._old_table_ext, Data._old_table_format
                         
                     for attr, method in data_to_save.items():
@@ -2243,19 +2430,32 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
                             fname = attr + '.pkl'
                             with datazip.open(fname) as f:
                                 attrs[attr] = pickle.load(f)
+                        elif method == 'json':
+                            fname = attr + '.json'
+                            with datazip.open(fname) as f:
+                                attrs[attr] = json.load(f)
+                        elif method == 'txt':
+                            fname = attr + '.txt'
+                            with datazip.open(fname) as f:
+                                attrs[attr] = f.read().decode()
                         else:
                             raise ValueError(f'unrecognized saving method: {method}')
-            except zipfile.BadZipFile:
-                raise ValueError(f'The file is not a ".data" file. Did you mean "Data(\'{path}\', <...>)"?')
-            except KeyError:
-                raise FailedToLoadError(f"Failed to load '{path}': is not a '.data' file or is saved with an older version of astrotable.")
+            except zipfile.BadZipFile as e:
+                raise ValueError(f'The file is not a ".data" file. Did you mean "Data(\'{path}\', <...>)"?') from e
+            except KeyError as e:
+                ver = f" ({save_meta['package_version']})" if save_meta and 'package_version' in save_meta else ''
+                raise FailedToLoadError(f"Failed to load '{path}': is not a '.data' file or is saved with an older version{ver} of astrotable.") from e
             except:
                 raise
             dataname = attrs['name'] if 'name' in attrs else None
             data = cls(attrs['t'], name=dataname)
             update_names = [i for i in attrs if i not in ['name', 't']] # attrs that need to be updated
             for name in update_names:
-                setattr(data, name, attrs[name])
+                if name == 'meta': # a special case: can't set attribute 'meta'
+                    getattr(data, name).clear()    
+                    getattr(data, name).update(attrs[name])
+                else: # the normal cases
+                    setattr(data, name, attrs[name])
             return data
         elif format == 'pkl':
             return load_pickle(path)
@@ -2263,6 +2463,64 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             return cls(path, format=format, **kwargs)
     
     #### basic methods
+    
+    def metaJson(self, save_path=None, yes=False):
+        '''
+        Generate a json string for the metadata of this Data.
+    
+        The metadata of an ``astrotable.table.Data`` object typically saves the information
+        on where the data we loaded, how was it merged (if it is a merged catalog), etc.
+        It can be retrieved with ``data.meta``.
+        This is saved as the metadata of ``data.t``, i.e. ``data.meta is data.t.meta``.
+
+        Parameters
+        ----------
+        save_path : str, optional
+            A path to save the json as a file. The default is None (do not save).
+        yes : bool, optional
+            If set to True, existing files will be overwritten without prompts. The default is False.
+
+        Returns
+        -------
+        meta : str
+            A json string.
+
+        '''
+        def break_lines(odict, key):
+            odict[key] = odict[key].split('\n')
+            
+            # lines = odict[key] 
+            # assert isinstance(lines, str)
+            # keys = list(odict.keys())
+            # idx = keys.index(key)
+            # after_keys = keys[idx+1:]
+            # lines = lines.split('\n')
+            # odict.pop(key)
+            # for i, line in enumerate(lines):
+            #     odict[f'{key}_l{i+1}'] =  line
+            # for key in after_keys:
+            #     odict.move_to_end(key)
+                
+        def prepare_meta(odict):
+            if 'merging' in odict.keys():
+                break_lines(odict['merging'], 'tree')
+                for data in odict['merging']['metas']:
+                    prepare_meta(odict['merging']['metas'][data])
+            
+        meta = deepcopy(self.meta)
+        prepare_meta(meta)
+        
+        meta = json.dumps(meta, ensure_ascii=False, indent=4)
+        if save_path:
+            if os.path.exists(save_path) and not yes:
+                pause_and_warn(f"file '{save_path}' already exists!",
+                               choose='Proceed to overwrite this file?',
+                               yes_message=f"file '{save_path}' overwritten.")
+            with open(save_path, 'w', encoding='utf8') as f:
+                f.write(meta)
+        return meta
+    
+    ## below are magic methods
     
     def __repr__(self):
         name = f"'{self.name}'" if self.name is not None else 'without name'
@@ -2283,6 +2541,9 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         # changing existing columns; adding several new column seems to be unsupported)
         
         # warnings.warn('Although supported, it is not suggested to set items of the table by directly subscripting Data objects. Use e.g. data.t[index] instead of data[index].')
+        if not isinstance(item, str):
+            raise NotImplementedError('Currently, we only accept a str as the index. You may consider directly setting the values by `data.t[...] = ...` instead of `data[...] = ...` (WITH CAUTION).')
+            
         new = isinstance(item, str) and item not in self.colnames
         if new:
             self.t[item] = value

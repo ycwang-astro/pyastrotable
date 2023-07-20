@@ -8,10 +8,18 @@ Built-in matchers.
 """
 
 import numpy as np
-from astrotable.utils import find_idx, find_eq
+from astrotable.utils import find_idx, find_eq, find_dup
 from astropy.coordinates import SkyCoord
 import astropy.units as u
 from astropy.units import UnitTypeError
+import warnings
+
+class UnsafeMatchingWarning(Warning):
+    pass
+    # def __init__(self, data, **kwargs)
+
+class DuplicationWarning(UnsafeMatchingWarning):
+    pass
 
 class ExactMatcher():
     def __init__(self, value, value1):
@@ -40,6 +48,14 @@ class ExactMatcher():
             self.value = data.t[self.value]
         if type(self.value1) is str:
             self.value1 = data1.t[self.value1]
+        dup_vals = find_dup(self.value)
+        if dup_vals.size > 0:
+            warnings.warn(f"Duplications found for data '{data.name}' while matching '{data1.name}' to it: the same row of '{data1.name}' may be matched to multiple rows in '{data.name}'.",
+                          stacklevel=3, category=DuplicationWarning)
+        dup_vals = find_dup(self.value1)
+        if dup_vals.size > 0:
+            warnings.warn(f"Duplications found for data '{data1.name}' while matching to '{data.name}': there may be multiple rows in '{data1.name}' that can be matched to a row in '{data.name}', and only one will be returned by the matcher.",
+                          stacklevel=3, category=DuplicationWarning)
         missings = [] # whether the coord is missing
         not_missing_ids = [] # the indices of those that are not missing
         for valuei, datai in [[self.value, data], [self.value1, data1]]:
@@ -157,8 +173,6 @@ class SkyMatcher():
                     got_unit =  info.split('set it to ')[-1]
                     raise UnitTypeError(f"Unrecognized unit for column '{which_coor}': expected units equivalent to 'rad', got {got_unit}"\
                                         f" Try manually setting {datai.__repr__()}.t['{which_coor}'].unit") from e
-                except:
-                    raise
             
             elif type(coordi) is SkyCoord:
                 self.ra_name, self.dec_name = None, None
@@ -177,6 +191,16 @@ class SkyMatcher():
         self.coord, self.coord1 = coords
         self.missing, self.missing1 = missings
         self.not_missing_id, self.not_missing_id1 = not_missing_ids
+        
+        # check duplicates for coordinates
+        _, counts = np.unique(np.stack([self.coord.ra, self.coord.dec]), axis=1, return_counts=True)
+        if np.any(counts != 1):
+            warnings.warn(f"Duplications found for data '{data.name}' while matching '{data1.name}' to it: the same row of '{data1.name}' may be matched to multiple rows in '{data.name}'.",
+                          stacklevel=3, category=DuplicationWarning)
+        _, counts = np.unique(np.stack([self.coord1.ra, self.coord1.dec]), axis=1, return_counts=True)
+        if np.any(counts != 1):
+            warnings.warn(f"Duplications found for data '{data1.name}' while matching to '{data.name}': there may be multiple rows in '{data1.name}' that can be matched to a row in '{data.name}', and only one will be returned by the matcher.",
+                          stacklevel=3, category=DuplicationWarning)
         
     def match(self):
         l = len(self.missing)
@@ -216,3 +240,27 @@ class SkyMatcher():
         
     def __repr__(self):
         return f'<SkyMatcher with thres={self.thres}>'
+
+class IdentityMatcher():
+    def __init__(self):
+        '''
+        Used to match `astrotable.table.Data` objects `data1` to `data`.
+        Directly match records row by row, i.e. row #1 matched to row #1, row #2 matched to row #2, etc.
+        Only possible if ``len(data1) == len(data)``.
+        This should be passed to method `data.match()`.
+        See `help(data.match)`.
+        '''
+    
+    def get_values(self, data, data1, verbose=True):
+        if len(data) != len(data1):
+            raise ValueError(f'IdentityMatcher can only be used to match data with the same number of rows ({len(data)} != {len(data1)})')
+        self.len = len(data)
+    
+    def match(self):
+        idx = np.arange(self.len)
+        matched = np.full((self.len,), True)
+        return idx, matched    
+    
+    def __repr__(self):
+        return '<IdentityMatcher>'
+    

@@ -68,6 +68,13 @@ def find_eq(array, values):
     # same as [[np.all(a[i] == b[j]) for j in range(array.shape[0])] for i in range(values.shape[0])]
     return eq
 
+def find_dup(arr):
+    if np.ma.is_masked(arr):
+        arr = arr[~arr.mask]
+    arr, counts = np.unique(arr, return_counts=True)
+    dup_vals = arr[counts != 1]
+    return dup_vals
+
 # # testing find_eq
 # for i in range(values.shape[0]): 
 #     for j in range(array.shape[0]): 

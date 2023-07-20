@@ -10,7 +10,8 @@ Main tools to store, operate and visualize data tables.
 import matplotlib.pyplot as plt
 import numpy as np
 from astropy.table import Column, Table, hstack
-from astrotable.utils import objdict, save_pickle, load_pickle, keyword_alias, bitwise_all, pause_and_warn
+from astropy.io import ascii as apascii
+from astrotable.utils import objdict, save_pickle, load_pickle, keyword_alias, bitwise_all, pause_and_warn, find_dup
 import astrotable.plot as plot
 import astrotable
 import warnings
@@ -26,6 +27,7 @@ from copy import deepcopy
 import json
 import re
 from keyword import iskeyword
+from io import StringIO
 # import time
 
 try:
@@ -450,36 +452,44 @@ class Data():
         # get data
         if type(data) is str: # got a path
             self.t = Table.read(data, **kwargs)
-            self.path = data
+            self._path = data
         elif isinstance(data, Table): # got astropy table
             self.t = data
-            self.path = '(initialized from Table)'
+            self._path = '(initialized from Table)'
         # for large ascii files, loading with pd abd converting it to astropy.table.Table seems to be faster
         elif has_pd and type(data) == pd.DataFrame:
             self.t = Table.from_pandas(data)
-            self.path = '(initialized from DataFrame)'
+            self._path = '(initialized from DataFrame)'
         else: # try to convert to data
             self.t = Table(data)
-            self.path = f'(initalized from a {type(data)} object)'
-        self.meta['path'] = self.path
+            self._path = f'(initalized from a {type(data)} object)'
+        self.meta['path'] = self._path
          
         # basic properties
         self.name = name
-        if self.name is None and self.path is not None:
-            self.name = self.path.split('/')[-1].split('\\')[-1]
+        if self.name is None and self._path is not None:
+            self.name = self._path.split('/')[-1].split('\\')[-1]
         # self.id = time.time() #time.strftime('%y%m%d%H%M%S')
         
         # set metadata for columns (TODO: experimental feature)
-        if type(data) is str: # got a path
-            for colname in self.colnames:
-                col = self.t[colname]
-                if 'src' not in col.meta.keys():
-                    col.meta['src'] = self.name
-                    col.meta['src_detail'] = f'Loaded "{self.path}"'
-                    col.meta['set_by_user'] = False # whether the value of this column is modified by the user. 
+        for colname in self.colnames:
+            col = self.t[colname]
+            meta_keys = ['src', 'src_detail', 'set_by_user']
+            if all(key not in col.meta.keys() for key in meta_keys):
+                col.meta['src'] = self.name
+                col.meta['src_detail'] = f'{self._path}'
+                col.meta['set_by_user'] = False # whether the value of this column is modified by the user. 
                     # TODO: CAUTION: modification can only be detected when using data[] instead of data.t[]
-        else:
-            pass # TODO: not safe to set metadata for other input format, as they may have their own metadata
+        
+        # if type(data) is str: # got a path
+        #     for colname in self.colnames:
+        #         col = self.t[colname]
+        #         if 'src' not in col.meta.keys():
+        #             col.meta['src'] = self.name
+        #             col.meta['src_detail'] = f'Loaded "{self._path}"'
+        #             col.meta['set_by_user'] = False # whether the value of this column is modified by the user. 
+        # else:
+        #     pass # TODO: not safe to set metadata for other input format, as they may have their own metadata
         
         # matching
         self.matchinfo = []
@@ -506,7 +516,12 @@ class Data():
     
     @property
     def meta(self):
+        # notes: the table file (loaded from other formats) itself can contain its own metadata, so do not clear it.
         return self.t.meta
+    
+    @property
+    def path(self):
+        return self._path
     
     #### matching & merging 
     def match(self, data1, matcher, verbose=True, replace=False):
@@ -902,6 +917,11 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             are also merged. The rows with no match with 'data1' always do NOT belong to the subsets merged 
             from 'data1'.
         '''
+        if keep_unmatched:
+            raise NotImplementedError('Until a bug is fixed, the "keep_unmatched" feature is disabled. Sorry.')
+            # say we have the matching: cat1 <- cat2 <- cat3. If we do not require match with cat2, and 
+            # cat3 may be directly matched to cat1, then some rows with cat1, cat3 but not cat2 are missing.
+        
         if type(keep_unmatched) is str:
             keep_unmatched = [keep_unmatched]
         elif keep_unmatched is True:
@@ -941,7 +961,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         
         ## cut data and subsets (if needed) ##
         # cut myself
-        data = self.t[matched]
+        data = self.t[matched] # data is not self.t # even if `matched` is all True
         if self.name in merge_columns:
             data.keep_columns(merge_columns[self.name])
         if self.name in ignore_columns:
@@ -1002,7 +1022,10 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
                 data_subset_groups.append(subset_groups)
                
         # merge table and get data
-        matched_table = hstack([data] + data1_matched_tables, table_names=data_names)
+        tables_to_be_matched = [data] + data1_matched_tables
+        for t in tables_to_be_matched:
+            t.meta.clear() # handle meta by myself, not by astropy
+        matched_table = hstack(tables_to_be_matched, table_names=data_names)
         matched_data = Data(matched_table, name=outname)
         matched_data.meta['path'] = '(merged data)'
         
@@ -1033,7 +1056,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
                 keep_subsets=keep_subsets,
                 matchinfo_subset=matchinfo_subset,
                 ),
-            'tree': tree_str, # the match tree of the base data
+            'tree': '\n' + tree_str, # the match tree of the base data
             'merged': data_names, # names of the data merged
             'metas': data_metas, # metas for the data merged
             })
@@ -1320,6 +1343,55 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             if verbose:
                 n = len(self)
                 print(f"[mask missing] col '{col}': {n_miss}/{n} ({n_miss/n*100:.2f}%) masked (value: {missval}).")
+    
+    def check_duplication(self, *cols, action='print'):
+        '''
+        Check for duplicates for given columns
+
+        Parameters
+        ----------
+        *cols : str
+            The names of columns (if not given, all columns will be checked).
+        action : str, optional
+            What to do after checking. The valid actions are:
+                - 'print': print the results
+                - 'bool': return whether duplicates are found
+                - 'detail': return a dict containing the duplicate values for columns with duplicates
+                - 'subset': return a row subset including those where duplicates are found
+            
+            The default is 'print'.
+        '''
+        if len(cols) == 0:
+            cols = self.colnames
+        dups = {}
+        for col in cols:
+            vals = self[col]
+            dup_vals = find_dup(vals)
+            if isinstance(dup_vals, Column):
+                dup_vals = dup_vals.data
+            if dup_vals.size > 0:
+                dups[str(col)] = dup_vals # str(col) supports input like ('col1', 'col2')
+        
+        if action == 'print':
+            if dups: # duplicate found
+                for col, dup_vals in dups.items():
+                    print(f"Duplicates found for '{col}': {dup_vals}")
+            else: # no duplicates
+                print(f'No duplicates found for: {cols}')
+        elif action == 'bool':
+            return bool(dups)
+        elif action in ['value', 'detail']:
+            return dups
+        elif action == 'subset':
+            selection = np.full(len(self), False)
+            for col in cols:
+                unmasked = ~self[col].mask if np.ma.is_masked(self[col]) else True
+                selection |= np.isin(self[col], dups[str(col)]) & unmasked
+            subs = Subset(selection, name=f'dup_{"_".join(list(dups.keys()))}')
+            subs.eval_(self)
+            return subs
+        else:
+            raise ValueError(f"Unrecognized action '{action}'.")
     
     #### subsets
     
@@ -1674,16 +1746,35 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         ``Data``
 
         '''
-        if not isinstance(subsets, Iterable):
-            subset = subsets
+        return_list = True
+        if isinstance(subsets, Subset):
+            subsets = [subsets]
+            return_list = False
+            
+        subset_datas = []
+        for subset in subsets:
             table_subset = self.t[np.array(subset)]
-            return Data(table_subset, name=f'{self.name}_{subset.name}')
+            subset_data = Data(table_subset, name=f'{self.name}_SUBS({subset.name})')
+            # handle subsets
+            subset_data.meta.clear()
+            subset_data._path = f"(data '{self.name}' cut by subset)"
+            subset_data.meta.update({
+                'path': subset_data._path,
+                'subset': OrderedDict({
+                    'name': subset.name,
+                    'expression': subset.expression,
+                    'label': subset.label,
+                    'fraction': f'{subset.size}/{len(subset)}',
+                    }),
+                'notes': "The metadata for the orignal data '{self.name}' is recorded in 'meta'.",
+                'meta': self.meta,
+                })
+            subset_datas.append(subset_data)
+        if return_list:
+            return subset_datas
         else:
-            subset_data = []
-            for subset in subsets:
-                table_subset = self.t[np.array(subset)]
-                subset_data.append(Data(table_subset, name=f'{self.name}_{subset.name}'))
-            return subset_data
+            assert len(subset_datas) == 1
+            return subset_datas[0]
         
 
     def subset_data(self, path=None, name=None, group=None):
@@ -2273,8 +2364,8 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         'matchlog': 'json',
         'meta': 'json',
         }
-    table_format = 'fits' # 'asdf' # 'ascii.ecsv'
-    table_ext = '.fits' # '.asdf' # '.ecsv'
+    table_format = 'fits' # 'ascii.ecsv' # 'fits' # 'asdf' # 'ascii.ecsv'
+    table_ext = '.fits' # '.csv' # '.fits' # '.asdf' # '.ecsv'
     save_meta = dict( # all information for saving
         data_to_save=data_to_save,
         table_format=table_format,
@@ -2347,8 +2438,17 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
                         fname = attr + Data.table_ext
                         table = getattr(self, attr)
                         assert type(table) == Table
-                        with datazip.open(fname, mode='w') as f:
-                            table.write(f, format=Data.table_format) # ascii.ecsv
+                        if Data.table_format.startswith('ascii.'): # uses astropy.io.ascii
+                            # get the string
+                            with StringIO() as sf:
+                                table.write(sf, format=Data.table_format)
+                                table_str = sf.getvalue()
+                            table_str = table_str.encode()
+                            with datazip.open(fname, mode='w') as f:
+                                f.write(table_str)
+                        else:
+                            with datazip.open(fname, mode='w') as f:
+                                table.write(f, format=Data.table_format) # ascii.ecsv
                     elif method == 'pkl':
                         fname = attr + '.pkl'
                         with datazip.open(fname, mode='w') as f:
@@ -2452,6 +2552,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             update_names = [i for i in attrs if i not in ['name', 't']] # attrs that need to be updated
             for name in update_names:
                 if name == 'meta': # a special case: can't set attribute 'meta'
+                    # notes: the metadata is saved seperately in the data file, since some formats (e.g. fits) may not support certain features of the metadata.
                     getattr(data, name).clear()    
                     getattr(data, name).update(attrs[name])
                 else: # the normal cases

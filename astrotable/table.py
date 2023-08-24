@@ -68,7 +68,10 @@ class FailedToLoadError(Exception):
 class FailedToEvaluateError(Exception):
     pass
 
-class SubsetMergeError(Exception):
+class MergeError(Exception):
+    pass
+
+class SubsetMergeError(MergeError):
     pass
 
 class SubsetNotFoundError(LookupError):
@@ -351,6 +354,9 @@ class Subset():
         return np.sum(np.array(self))
     
     def __and__(self, subset): # the & (bitwise AND)
+        if self.data_name != subset.data_name:
+            warnings.warn(f"trying to broadcast together subsets of two different Data: \n{self} and {subset}",
+                          stacklevel=2)
         selection = self.selection & subset.selection
         name = f'{self.name} & {subset.name}'
         expression = f'({self.expression}) & ({subset.expression})'
@@ -367,6 +373,9 @@ class Subset():
         return new_subset
     
     def __or__(self, subset): # the | (bitwise OR)
+        if self.data_name != subset.data_name:
+            warnings.warn(f"trying to broadcast together subsets of two different Data: \n{self} and {subset}",
+                          stacklevel=2)
         selection = self.selection | subset.selection
         name = f'{self.name} | {subset.name}'
         expression = f'({self.expression}) | ({subset.expression})'
@@ -644,7 +653,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         self.matchlog = []
         self.matchnames = []
     
-    def _match_propagate(self, idx=None, matched=None, depth=-1, ignore_id=[]):
+    def _match_propagate(self, idx=None, matched=None, depth=-1, ignore_id=None, tree=None):
         '''
         Propagate all of the match to self's "child" data to self's "parent" data.
 
@@ -658,6 +667,8 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             Depth. The default is -1.
         ignore_id : Iterable, optional
             Data id to be ignored. The default is [].
+        tree : dict, optional
+            The returned ``tree`` of self._match_tree, used to decide whether a data should be merged. 
 
         Returns
         -------
@@ -665,21 +676,29 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             The 'idx', 'matched' information for (all of self's child data) matched to (self's parent data).
 
         '''
-        ignore_id = ignore_id.copy()
+        if ignore_id is None: ignore_id = []
+        data1s, idxs, matcheds, depths, has_child = [], [], [], [], []
+     
+        if tree and not tree[self]['merge']: # myself should not be merged?! do nothing
+            return data1s, idxs, matcheds, ignore_id
+        childs = tree[self]['child'] if tree else None
         
+        ## below: myself should be merged
         if id(self) not in ignore_id:
             ignore_id.append(id(self))
+        elif tree:
+            raise RuntimeError('this should not happen')
         
         if idx is None:
             idx = np.arange(len(self))
         if matched is None:
             matched = np.full((len(self),), True)
         
-        data1s, idxs, matcheds = [], [], []
         if depth != 0:
             for info in self.matchinfo: # analyze the child data of self
                 data1 = info.data1
-                if id(data1) in ignore_id:
+                if childs: assert childs[data1]['matcher'] is info.matcher
+                if id(data1) in ignore_id or (childs and not childs[data1]['merge']):
                     continue
                 
                 # get match info for data1  (self's parent to self's child "data1")
@@ -695,17 +714,25 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
                 idx_ps[~matched_ps] = -len(data1) - 1
                 
                 data1s.append(data1)
-                ignore_id.append(id(data1))
+                # ignore_id.append(id(data1)) # this is done in data1._match_propagate
                 idxs.append(idx_ps)
                 matcheds.append(matched_ps)
+                depths.append(depth-1)
                 
                 # ask data1 to give me all of its child data
-                data1_data1s, data1_idxs, data1_matcheds, ignore_id = data1._match_propagate(idx=idx_ps, matched=matched_ps, depth=depth-1, ignore_id=ignore_id)
+                data1_data1s, data1_idxs, data1_matcheds, data1_depths, data1_has_child, ignore_id = data1._match_propagate(idx=idx_ps, matched=matched_ps, depth=depth-1, ignore_id=ignore_id, tree=childs)
+                # if len(data1_data1s) == 0: # data1 has no children
+                #     has_child.append(False)
+                # else:
+                #     has_child.append(True)
+                has_child.append([d.name for d in data1_data1s])
                 data1s += data1_data1s
                 idxs += data1_idxs
                 matcheds += data1_matcheds
+                depths += data1_depths
+                has_child += data1_has_child
         
-        return data1s, idxs, matcheds, ignore_id
+        return data1s, idxs, matcheds, depths, has_child, ignore_id
                 
     def merge_matchinfo(self, depth=-1):
         '''
@@ -729,13 +756,16 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
 
         '''
         outinfo = []
-        data1s, idxs, matcheds, _ = self._match_propagate(depth=depth)
-        for data1, idx, matched in zip(data1s, idxs, matcheds):
+        tree, _, _ = self._match_tree(depth=depth)
+        data1s, idxs, matcheds, depths, has_child, _ = self._match_propagate(depth=depth, tree=tree)
+        for data1, idx, matched, depth, has_childi in zip(data1s, idxs, matcheds, depths, has_child):
             outinfo.append(objdict(
                 matcher = None,
                 data1 = data1,
                 idx = idx,
                 matched = matched,
+                depth=depth,
+                has_child=has_childi,
                 ))
         return outinfo
     
@@ -917,17 +947,17 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             are also merged. The rows with no match with 'data1' always do NOT belong to the subsets merged 
             from 'data1'.
         '''
-        if keep_unmatched:
-            raise NotImplementedError('Until a bug is fixed, the "keep_unmatched" feature is disabled. Sorry.')
-            # say we have the matching: cat1 <- cat2 <- cat3. If we do not require match with cat2, and 
-            # cat3 may be directly matched to cat1, then some rows with cat1, cat3 but not cat2 are missing.
+        # if keep_unmatched:
+        #     raise NotImplementedError('Until a bug is fixed, the "keep_unmatched" feature is disabled. Sorry.')
+        #     # say we have the matching: cat1 <- cat2 <- cat3. If we do not require match with cat2, and 
+        #     # cat3 may be directly matched to cat1, then some rows with cat1, cat3 but not cat2 are missing.
         
         if type(keep_unmatched) is str:
             keep_unmatched = [keep_unmatched]
         elif keep_unmatched is True:
-            keep_unmatched, _, _ = self._match_tree(depth=depth, silent=True)
+            keep_unmatched, _, _ = self._print_match_tree(self._match_tree(depth=depth)[0], silent=True)
             keep_unmatched = keep_unmatched[1:]
-            if verbose: print(f'[merge] `keep_unmatched` set to all subsets matched to {self}: {keep_unmatched}')
+            if verbose: print(f'[merge] `keep_unmatched` set to all data matched to {self}: {keep_unmatched}')
         
         matched = np.full((len(self),), True) # whether a record in self is matched to ALL the child data
         data1_matched_tables = []
@@ -936,7 +966,15 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         data_metas = {self.name: self.meta}
         data_subset_groups = [] # list of cutted subset groups for each data
         
+        self.match_tree(depth=depth, detail=False)
         merged_matchinfo = self.merge_matchinfo(depth=depth)
+        
+        ## check keep_unmatched
+        if self.name in keep_unmatched:
+            raise ValueError(f"cannot include base data '{self.name}' in `keep_unmatched`")
+        for matchinfo in merged_matchinfo:
+            if matchinfo.data1.name in keep_unmatched and matchinfo.has_child:
+                raise MergeError(f"cannot include data '{matchinfo.data1.name}' in `keep_unmatched`, because {matchinfo.has_child} is/are matched through the intermediary '{matchinfo.data1.name}'")
         
         ## get matched indices
         for matchinfo in merged_matchinfo:
@@ -1007,8 +1045,8 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
                     subsets_to_be_added.append(Subset(
                         data1_matched, 
                         name=data1.name, 
-                        expression=f"<'{data1.name}' matched to '{self.name}'>",
-                        label=f"'{data1.name}' matched to '{self.name}'"))
+                        expression=f"<'{data1.name}' matched when merging to '{self.name}'>",
+                        label=f"'{data1.name}' matched when merging to '{self.name}'"))
 
             else: # do not keep unmatched
                 data1_matched_table = data1_table[idx[matched]]
@@ -1045,7 +1083,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         
         ## generate data meta
         assert list(data_metas.keys()) == data_names
-        matched_names, _, tree_str = self._match_tree(depth=depth, silent=True)
+        matched_names, _, tree_str = self._print_match_tree(self._match_tree(depth=depth)[0], silent=True)
         assert data_names == matched_names
         merging = OrderedDict({ # detailed information for merging
             'notes': 'This is a table merged from several tables. The merging information is recorded below.'\
@@ -1127,7 +1165,77 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         self.match(data1=data1, matcher=matcher, verbose=verbose)
         return self.merge(keep_unmatched=keep_unmatched, merge_columns=merge_columns, ignore_columns=ignore_columns, outname=outname, verbose=verbose)
     
-    def _match_tree(self, depth=-1, detail=True, matched_names=[], matched_ids=[], indent='', matcher='base', tree_str='', silent=False):
+    def _match_tree(self, depth=-1, matcher='base', datas=None, removed_datas=None):
+        # matcher: how I am matched to my parent
+        # tree: the matched datas, in tree form
+        # datas: the matched datas
+        
+        # initialize vars if not given
+        tree = OrderedDict()
+        if datas is None:
+            datas = OrderedDict()
+        if removed_datas is None: # this is generally useless now
+            removed_datas = OrderedDict()
+        
+        # add myself to the tree
+        if any(self is i for i in datas) and depth <= datas[self]['depth']: 
+            # we have already seen this data before and do not use myself here to match
+            tree[self] = dict(
+                name = self.name,
+                depth = depth,
+                matcher = matcher,
+                merge = False,
+                child = OrderedDict(),
+                )
+        else: # we have not seen this data before OR find a shallower match here
+            if any(self is i for i in datas) and depth > datas[self]['depth']: # remove the existing match
+                datas[self]['dict'][self]['child'].clear()
+                datas[self]['dict'][self]['merge'] = False
+                removed_datas[datas.pop(self)['depth']] = self # depth: data to remove
+       
+            # add myself, use myself here to match
+            datas[self] = {'depth': depth, 'dict': tree} # 'dict' is the dict containing it
+            tree[self] = dict(
+                name = self.name,
+                depth = depth,
+                matcher = matcher,
+                merge = True,
+                child = OrderedDict(),
+                )
+            if depth != 0: # add my children
+                for info in self.matchinfo:
+                    data = info.data1
+                    matcher = info.matcher
+                    data_tree, datas, removed_datas = data._match_tree(depth=depth-1, matcher=matcher, datas=datas, removed_datas=removed_datas)
+                    assert not any(data is i for i in tree[self]['child'])
+                    tree[self]['child'].update(data_tree)
+                        
+        return tree, datas, removed_datas
+    
+    def _print_match_tree(self, tree, detail=True, indent='', tree_str='', silent=False):
+        matched_names = []
+        matched_ids = []
+        # print match tree given tree returned by self._match_tree
+        for data, info in tree.items():
+            # print data
+            if info['merge']: #id(data) not in matched_ids:
+                matched_names.append(data.name)
+                matched_ids.append(id(data))
+            matcher = '' if not detail else f' [{info["matcher"]}]'
+            name = 'Unnamed' if info['name'] is None else info['name']
+            name = '(' + name + ')' if not info['merge'] else name
+            print_str = f'{indent}{name}{matcher}'
+            if not silent: print(print_str)
+            tree_str += print_str + '\n'
+            added_matched_names, added_matched_ids, tree_str = self._print_match_tree(info['child'], detail=detail, indent=indent+':   ', tree_str=tree_str, silent=silent)
+            matched_ids += added_matched_ids
+            matched_names += added_matched_names
+        
+        # just to be compatible with old _match_tree
+        return matched_names, matched_ids, tree_str
+
+    
+    def _old_match_tree(self, depth=-1, detail=True, matched_names=[], matched_ids=[], indent='', matcher='base', tree_str='', silent=False):
         # copy lists to avoid modifying it in-place (which will cause the method to "remember" them!)
         matched_names = matched_names.copy()
         matched_ids = matched_ids.copy()
@@ -1152,7 +1260,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             for info in self.matchinfo:
                 data = info.data1
                 matcher = info.matcher
-                matched_names, matched_ids, tree_str = data._match_tree(depth=depth-1, detail=detail, matched_names=matched_names, matched_ids=matched_ids, indent=indent+':   ', matcher=matcher, tree_str=tree_str, silent=silent)
+                matched_names, matched_ids, tree_str = data._old_match_tree(depth=depth-1, detail=detail, matched_names=matched_names, matched_ids=matched_ids, indent=indent+':   ', matcher=matcher, tree_str=tree_str, silent=silent)
         return matched_names, matched_ids, tree_str
             
     def match_tree(self, depth=-1, detail=True):
@@ -1176,7 +1284,9 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         '''
         print('Names with parentheses are already matched, thus they are not expanded and will be ignored when merging.')
         print('---------------')
-        self._match_tree(depth=depth, detail=detail)
+        tree, _, _ = self._match_tree(depth=depth)
+        self._print_match_tree(tree, detail=detail)
+        # self._old_match_tree(depth=depth, detail=detail)
         print('---------------')
     
     #### operation
@@ -1753,9 +1863,11 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             
         subset_datas = []
         for subset in subsets:
-            table_subset = self.t[np.array(subset)]
+            index = np.array(subset)
+            table_subset = self.t[index]
             subset_data = Data(table_subset, name=f'{self.name}_SUBS({subset.name})')
-            # handle subsets
+            
+            # handle meta
             subset_data.meta.clear()
             subset_data._path = f"(data '{self.name}' cut by subset)"
             subset_data.meta.update({
@@ -1766,9 +1878,13 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
                     'label': subset.label,
                     'fraction': f'{subset.size}/{len(subset)}',
                     }),
-                'notes': "The metadata for the orignal data '{self.name}' is recorded in 'meta'.",
+                'notes': f"The metadata for the orignal data '{self.name}' is recorded in 'meta'.",
                 'meta': self.meta,
                 })
+            
+            # handle subsets
+            subset_data.subset_groups = Data._cut_subset_groups(self.subset_groups, index, self.name)
+            
             subset_datas.append(subset_data)
         if return_list:
             return subset_datas

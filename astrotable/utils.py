@@ -10,7 +10,7 @@ import warnings
 import pickle
 import os
 from functools import wraps, reduce
-from operator import iand
+from operator import iand, ior
 
 #%% array/Iterable operation
 
@@ -95,6 +95,9 @@ def bitwise_all(iterable):
     For example, ``bitwize_all([a, b, c])`` is equivalent to ``a & b & c``.
     '''
     return reduce(iand, iterable)
+
+def bitwise_or(iterable):
+    return reduce(ior, iterable)
 
 #%% basic types
 

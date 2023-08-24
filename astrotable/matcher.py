@@ -59,7 +59,8 @@ class ExactMatcher():
         missings = [] # whether the coord is missing
         not_missing_ids = [] # the indices of those that are not missing
         for valuei, datai in [[self.value, data], [self.value1, data1]]:
-            if datai.t.masked:
+            if np.ma.is_masked(valuei): #datai.t.masked:
+                # NOTE: it should not matter whether datai.t is masked; it is valuei that matters. A table that is not "masked" can have masked colums; valuei can also be user-specified rather than from datai.t
                 missingi = valuei.mask
             else:
                 missingi = np.full(len(datai), False)
@@ -159,10 +160,13 @@ class SkyMatcher():
                     dec = datai.t[self.dec_name]
                 
                 # check missing values for ra and dec
-                if datai.t.masked:
-                    missingi = ra.mask | dec.mask
-                else:
-                    missingi = np.full(len(datai), False)
+                # TODO: below NOT TESTED
+                missingi = np.full(len(datai), False)
+                if np.ma.is_masked(ra):
+                    missingi |= ra.mask
+                if np.ma.is_masked(dec): # datai.t.masked or 
+                    missingi |= dec.mask
+                    
                 not_missing_idi = np.arange(len(datai), dtype=int)[~missingi]
                 
                 try:

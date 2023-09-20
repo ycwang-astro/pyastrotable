@@ -10,7 +10,7 @@ Main tools to store, operate and visualize data tables.
 import matplotlib.pyplot as plt
 import numpy as np
 from astropy.table import Column, Table, hstack
-from astropy.io import ascii as apascii
+# from astropy.io import ascii as apascii
 from astrotable.utils import objdict, save_pickle, load_pickle, keyword_alias, bitwise_all, pause_and_warn, find_dup
 import astrotable.plot as plot
 import astrotable
@@ -28,6 +28,7 @@ import json
 import re
 from keyword import iskeyword
 from io import StringIO
+from difflib import get_close_matches
 # import time
 
 try:
@@ -75,16 +76,26 @@ class SubsetMergeError(MergeError):
     pass
 
 class SubsetNotFoundError(LookupError):
-    def __init__(self, name, kind='path'):
+    def __init__(self, name, kind='path', suggest_names=None):
         if kind == 'path':
-            info = f"'{name}'. Maybe missing/incorrect group name or incorrect subset name?"
+            suggest_str = " (did you mean: '{}')".format("', '".join(suggest_names)) if suggest_names else ''
+            info = f"'{name}'. Maybe missing/incorrect group name or incorrect subset name{suggest_str}?"
         elif kind in ['subset', 'name']:
             info = f"'{name}'"
+            if suggest_names:
+                info += ". Did you mean: '{}'".format("', '".join(suggest_names))
         else:
             raise ValueError(f"unknown kind '{kind}'")
         super().__init__(info)
         
-class GroupNotFoundError(KeyError):
+class GroupNotFoundError(LookupError):
+    def __init__(self, name, suggest_names=None):
+        info = f"'{name}'"
+        if suggest_names:
+            info += ". Did you mean: '{}'".format("', '".join(suggest_names))
+        super().__init__(info)
+
+class ColumnNotFoundError(LookupError):
     pass
 
 class Subset():
@@ -1310,13 +1321,13 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             if -1 is given, will automatically use all available cpu cores.
             if None, multiprocess will not be used.
         args : Iterable, optional
-            Additional arguments to be passed to func. The default is ().
+            Additional arguments to be passed to func (not supported for multiprocessing). The default is ().
         **kwargs :
-            Additional keyword arguments to be passed to func.
+            Additional keyword arguments to be passed to func (not supported for multiprocessing).
 
         Returns
         -------
-        ``astropy.table.Column``
+        list
             Result of applying ``func`` to each row.
 
         '''
@@ -1325,13 +1336,16 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             for row in self.t:
                 result.append(func(row, *args, **kwargs))
         elif type(processes) is int:
+            if args or kwargs:
+                raise TypeError('passing args or kwargs is not supported for multiprocessing')
             if processes == -1:
                 processes = None
-            pool = mp.Pool(processes)
-            result = pool.map(func, self.t)
+            with mp.Pool(processes) as pool: 
+                result = pool.map(func, self.t)
         else:
             raise TypeError('"processes" should be None or int.')
-        return Column(result)
+        # return Column(result)
+        return result
     
     def _get_colnames_variable(self):
         '''
@@ -1800,13 +1814,15 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             return self._get_special_subset(group, name)
         
         if group not in self.subset_groups.keys():
-            raise GroupNotFoundError(group)
+            suggest_names = get_close_matches(group, self.subset_groups.keys())
+            raise GroupNotFoundError(group, suggest_names=suggest_names)
         
         if name not in self.subset_groups[group].keys():
             if autosearch:
                 subset = self._get_subset_from_name(name) # search for this name in all groups
             else:
-                raise SubsetNotFoundError(f"{group}/{name}", kind='path')
+                suggest_names = get_close_matches(name, self.subset_groups[group].keys())
+                raise SubsetNotFoundError(f"{group}/{name}", kind='path', suggest_names=suggest_names)
         else:
             subset = self.subset_groups[group][name]
         return subset
@@ -2748,7 +2764,14 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
     
     def __getitem__(self, item):
         # warnings.warn('Although supported, it is not suggested to access table by directly subscripting Data objects. Use e.g. data.t[index] instead of data[index].')
-        return (self.t[item])
+        try:
+            return (self.t[item])
+        except KeyError as e:
+            suggest_names = get_close_matches(item, self.colnames)
+            msg = f"'{item}'"
+            if suggest_names:
+                msg += ". (did you mean: '{}')".format("', '".join(suggest_names))
+            raise ColumnNotFoundError(msg) from e
         # return Data(self.t[item])
     
     def __setitem__(self, item, value):

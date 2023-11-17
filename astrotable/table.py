@@ -1321,7 +1321,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             if -1 is given, will automatically use all available cpu cores.
             if None, multiprocess will not be used.
         args : Iterable, optional
-            Additional arguments to be passed to func (not supported for multiprocessing). The default is ().
+            Additional arguments to be passed to func. The default is ().
         **kwargs :
             Additional keyword arguments to be passed to func (not supported for multiprocessing).
 
@@ -1336,12 +1336,18 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             for row in self.t:
                 result.append(func(row, *args, **kwargs))
         elif type(processes) is int:
-            if args or kwargs:
-                raise TypeError('passing args or kwargs is not supported for multiprocessing')
+            if kwargs:
+                raise TypeError('passing kwargs is not supported for multiprocessing')
             if processes == -1:
                 processes = None
             with mp.Pool(processes) as pool: 
-                result = pool.map(func, self.t)
+                if args != (): # additional arguments are passed: use starmap
+                    if not isinstance(args, Iterable):
+                        args = (args,)
+                    func_args = ((row, *args) for row in self.t)
+                    result = pool.starmap(func, func_args)
+                else:
+                    result = pool.map(func, self.t)
         else:
             raise TypeError('"processes" should be None or int.')
         # return Column(result)

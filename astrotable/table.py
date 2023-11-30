@@ -1887,7 +1887,8 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         for subset in subsets:
             index = np.array(subset)
             table_subset = self.t[index]
-            subset_data = Data(table_subset, name=f'{self.name}_SUBS({subset.name})')
+            new_name = f'{self.name}_SUBS({subset.name})'
+            subset_data = Data(table_subset, name=new_name)
             
             # handle meta
             subset_data.meta.clear()
@@ -1905,7 +1906,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
                 })
             
             # handle subsets
-            subset_data.subset_groups = Data._cut_subset_groups(self.subset_groups, index, self.name)
+            subset_data.subset_groups = Data._cut_subset_groups(self.subset_groups, index, new_name)
             
             subset_datas.append(subset_data)
         if return_list:

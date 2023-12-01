@@ -1865,13 +1865,20 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         else:
             raise ValueError(f"unrecognized special subset group: '{group}'")
     
-    def _data_from_subset(self, subsets):
+    def _data_from_subset(self, subsets, minimal=False):
         '''
         Returns the sub-dataset from ``Subset`` objects
 
         Parameters
         ----------
         subsets : ``Subset`` or list of ``Subset``
+        
+        minimal : bool, optional
+            If set to True, only minimal operations will be executed 
+            (i.e. metadata and subsets are not handled for the subset data).
+            This is only expected to be true if the subset data is temporary 
+            (e.g. when used in ``Data.plot()``).
+            The default is False.
 
         Returns
         -------
@@ -1890,23 +1897,24 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             new_name = f'{self.name}_SUBS({subset.name})'
             subset_data = Data(table_subset, name=new_name)
             
-            # handle meta
-            subset_data.meta.clear()
-            subset_data._path = f"(data '{self.name}' cut by subset)"
-            subset_data.meta.update({
-                'path': subset_data._path,
-                'subset': OrderedDict({
-                    'name': subset.name,
-                    'expression': subset.expression,
-                    'label': subset.label,
-                    'fraction': f'{subset.size}/{len(subset)}',
-                    }),
-                'notes': f"The metadata for the orignal data '{self.name}' is recorded in 'meta'.",
-                'meta': self.meta,
-                })
-            
-            # handle subsets
-            subset_data.subset_groups = Data._cut_subset_groups(self.subset_groups, index, new_name)
+            if not minimal:
+                # handle meta
+                subset_data.meta.clear()
+                subset_data._path = f"(data '{self.name}' cut by subset)"
+                subset_data.meta.update({
+                    'path': subset_data._path,
+                    'subset': OrderedDict({
+                        'name': subset.name,
+                        'expression': subset.expression,
+                        'label': subset.label,
+                        'fraction': f'{subset.size}/{len(subset)}',
+                        }),
+                    'notes': f"The metadata for the orignal data '{self.name}' is recorded in 'meta'.",
+                    'meta': self.meta,
+                    })
+                
+                # handle subsets
+                subset_data.subset_groups = Data._cut_subset_groups(self.subset_groups, index, new_name)
             
             subset_datas.append(subset_data)
         if return_list:
@@ -2047,7 +2055,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
     # and translate it to make it the same as columns=('col1', 'col2'), kwarg_columns={'c': 'col3'}.
     @keyword_alias('deprecated', columns='cols', kwarg_columns='kwcols')
     @keyword_alias('accepted', group='groups')
-    def plot(self, func, *args, col_input=None, cols=None, kwcols={}, paths=None, subsets=None, groups=None, autolabel=True, ax=None, global_selection=None, title=None, iter_kwargs={}, **kwargs):
+    def plot(self, func, *args, col_input=None, cols=None, kwcols={}, eval=False, paths=None, subsets=None, groups=None, autolabel=True, ax=None, verbose=True, global_selection=None, title=None, iter_kwargs={}, **kwargs):
         '''
         Make a plot given a plotting function.
         
@@ -2064,13 +2072,18 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         cols : str or list of str, optional
             The name of the columns to be passed to ``func``. 
             For example, if ``cols = ['col1', 'col2']``, ``func`` will be called by:
-                ``func(data.t['col1'], data.t['col2'], *args)``
+                ``func(data['col1'], data['col2'], *args)``
             `Note`: When ``autolabel`` is True, the len of this argument is used to guess the dimension of the plot (e.g. 2D/3D).
             The default is None.
         kwcols : dict, optional
             Names of data columns that are passed to ``func`` as keyword arguments.
             For example, if ``kwcols={'x': 'col1', 'y':'col2'}``, ``func`` will be called by:
-                ``func(x=data.t['col1'], y=data.t['col2'])``
+                ``func(x=data['col1'], y=data['col2'])``
+        eval : bool, optional
+            If set to ``True``, the names of data columns for ``cols`` and ``kwcols`` will be regarded as expressions to be evaluated with ``Data.eval()``.
+            This means that you can not only input column names, but also input expressions. See ``help(Data.eval)`` for the syntax of expressions.
+            Otherwise, the names will simply be considered as column names.
+            The default is False.
         paths : str or list of str, optional
             The full path of a subset (e.g. ``'<group_name>/<subset_name>'``) or a list of paths.
             If this is given, arguments ``subsets`` and ``group`` are ignored.
@@ -2089,6 +2102,8 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             Label for axes and legends are only possible for axes if argument ``ax`` is given.
             
             The default is True.
+        verbose : bool, optional
+            Whether some detailed information is printed. The default is True.
         ax : axes, optional
             The axis of the plot. 
             Note that this is ONLY used for adding axis labels and legends; 
@@ -2137,7 +2152,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             columns = [columns]
         if type(func) is str:
             if func not in plot_funcs:
-                raise ValueError(f'Supported func names are: {",".join(plot_funcs.keys())}')
+                raise ValueError("unrecognized func name '{}' (supported names: '{}')".format(func, "', '".join(plot_funcs.keys())))
             func = plot_funcs[func]
         else:
             func = plot.plotFuncAuto(func)
@@ -2157,7 +2172,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         if global_selection is not None:
             subsets = [(subset & global_selection) for subset in subsets]
             
-        subset_data_list = self._data_from_subset(subsets)
+        subset_data_list = self._data_from_subset(subsets, minimal=True)
         # subset_data_list = self.subset_data(path=paths, name=subset_names, group=groups)
         # if type(subset_data_list) is Data:
         #     subset_data_list = [subset_data_list]
@@ -2181,11 +2196,11 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
                 warnings.warn('You are setting the same label for plots of multiple subsets.')
             
             # set axis label
+            label_kwargs = func.config['ax_label_kwargs_generator']
             if ax is not None and columns is not None:
-                ax.set(**dict(zip(
-                    ['xlabel', 'ylabel', 'zlabel'], 
+                ax.set(**label_kwargs(
                     self.get_labels(*columns, listalways=True),
-                    )))
+                    ))
             
             # special case for my scatter()
             if type(func) == plot.PlotFunction and type(func.func) == plot.Scatter and 'c' in kwarg_columns and 'barlabel' not in kwargs:
@@ -2208,20 +2223,32 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         else:
             plot_func = func
         
+        if verbose and eval:
+            # print expressions to be evaluated
+            pass 
+            # TODO: NOT IMPLEMENTED
+                        # if verbose and column not in self.colnames: 
+                        #     print(f"[plot] expression evaluated: '{column}'")
+        
         for subset_data, iter_kwargs in zip(subset_data_list, iter_kwargs_list):
+            if eval:
+                get_col = subset_data.eval
+            else:
+                get_col = subset_data.__getitem__
+            
             if columns is None:
                 input_data = () # input data for the func (as *args)
             else:
                 input_data = []
                 for column in columns:
-                    input_data.append(subset_data.t[column])
+                    input_data.append(get_col(column))
             this_kwarg_columns = {}
             for argname in kwarg_columns:
                 argval = kwarg_columns[argname]
                 if isinstance(argval, str):
-                    this_kwarg_columns[argname] = subset_data.t[argval]
+                    this_kwarg_columns[argname] = get_col(argval)
                 elif isinstance(argval, (list, tuple)) and all(isinstance(v, str) for v in argval):
-                    this_kwarg_columns[argname] = [subset_data.t[v] for v in argval]
+                    this_kwarg_columns[argname] = [get_col(v) for v in argval]
                 else:
                     raise TypeError(f'expected str or list/tuple of str for values of kwcols, got "{type(argval)}"')
             
@@ -2251,7 +2278,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
     
     @keyword_alias('deprecated', columns='cols', kwarg_columns='kwcols') # deprecated old names
     @keyword_alias('accepted', group='plotgroups', groups='plotgroups', paths='plotpaths', subsets='plotsubsets', ax='axes') # make plot() arguments acceptable here 
-    def plots(self, func, *args, cols=None, kwcols={}, plotpaths=None, plotsubsets=None, plotgroups=None, arraygroups=None, global_selection=None, share_ax=False, autobreak=False, autolabel=True, ax_callback=None, returns='fig', axes=None, fig=None, iter_kwargs={}, **kwargs):
+    def plots(self, func, *args, cols=None, kwcols={}, eval=False, plotpaths=None, plotsubsets=None, plotgroups=None, arraygroups=None, global_selection=None, share_ax=False, autobreak=False, autolabel=True, ax_callback=None, returns='fig', verbose=True, axes=None, fig=None, iter_kwargs={}, **kwargs):
         '''
         Make a plot given the function ``func`` used for plotting.
         
@@ -2296,13 +2323,18 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         cols : str or list of str, optional
             The name of the columns to be passed to the plotting function. 
             For example, if ``cols = ['col1', 'col2']``, the plotting function will be called by:
-                ``plotting_function(data.t['col1'], data.t['col2'], *args)``
+                ``func(data['col1'], data['col2'], *args)``
             `Note`: When ``autolabel`` is True, the len of this argument is used to guess the dimension of the plot (e.g. 2D/3D).
             The default is None.
         kwcols : dict, optional
             Names of data columns that are passed to the plotting function as keyword arguments.
             For example, if ``kwcols={'x': 'col1', 'y':'col2'}``, the plotting function will be called by:
-                ``plotting_function(x=data.t['col1'], y=data.t['col2'])``
+                ``func(x=data['col1'], y=data['col2'])``
+        eval : bool, optional
+            If set to ``True``, the names of data columns for ``cols`` and ``kwcols`` will be regarded as expressions to be evaluated with ``Data.eval()``.
+            This means that you can not only input column names, but also input expressions. See ``help(Data.eval)`` for the syntax of expressions.
+            Otherwise, the names will simply be considered as column names.
+            The default is False.
         paths, subsets, groups :
             aliases of "plotpaths", "plotsubsets" and "plotgroups".
         plotpaths : str or list of str, optional
@@ -2361,6 +2393,8 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             Whatever this argument is, you can always retrive the figure, axes and the returned values (of the 
             plot function) of the last call of ``data.plot()`` with ``self.plot_fig, self.plot_axes, self.plot_returns``.
         
+        verbose : bool, optional
+            Whether some detailed information is printed. The default is True.
         ax :
             alias of "axes".
         axes : list of axes, optional
@@ -2421,7 +2455,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
                 axes = axes[0]
             if fig is None:
                 fig = axes.figure
-            ret = self.plot(func(axes), *args, cols=columns, kwcols=kwarg_columns, paths=plotpaths, subsets=plotsubsets, groups=plotgroups, autolabel=autolabel, global_selection=global_selection, ax=axes, iter_kwargs=iter_kwargs, **kwargs)
+            ret = self.plot(func(axes), *args, cols=columns, kwcols=kwarg_columns, eval=eval, paths=plotpaths, subsets=plotsubsets, groups=plotgroups, autolabel=autolabel, global_selection=global_selection, verbose=verbose, ax=axes, iter_kwargs=iter_kwargs, **kwargs)
             self.plot_returns.append(ret)
         
         else:
@@ -2473,7 +2507,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
                     subset_with_global = subset & global_selection
                 else:
                     subset_with_global = subset
-                ret = self.plot(func(ax), *args, cols=columns, kwcols=kwarg_columns, paths=plotpaths, subsets=plotsubsets, groups=plotgroups, autolabel=autolabel, ax=ax, global_selection=subset_with_global, title=subset.label, iter_kwargs=iter_kwargs, **kwargs)
+                ret = self.plot(func(ax), *args, cols=columns, kwcols=kwarg_columns, eval=eval, paths=plotpaths, subsets=plotsubsets, groups=plotgroups, autolabel=autolabel, verbose=verbose, ax=ax, global_selection=subset_with_global, title=subset.label, iter_kwargs=iter_kwargs, **kwargs)
                 self.plot_returns.append(ret)
                 
                 if ax_callback is not None:

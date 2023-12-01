@@ -12,8 +12,20 @@ from functools import wraps
 from inspect import signature, isfunction
 from astrotable.utils import objdict
 from collections.abc import Iterable
+from copy import deepcopy
 
 Axes = matplotlib.axes.Axes
+
+#%% config
+# Configuration that controls the behavior of Data.plot() (or Data.plots()) when a PlotFunction object is passed to it.
+# This is the global and default config; customize it for each individual plot function, say `plot`, 
+# by directly modifying `plot.config`.
+DEFAULT_CONFIG = {
+    'ax_label_kwargs_generator': # function to generate the kwargs, to be passed to axis, that sets the axis labels
+        lambda labels: # input labels
+            dict(zip(['xlabel', 'ylabel', 'zlabel'], labels),), 
+            # returns dict like {'xlabel': xlabel, ...}
+    }
 
 #%% Class
 class PlotFunction():
@@ -45,6 +57,11 @@ class PlotFunction():
             self.func_doc = self.func_doc[1:]
         
         # self.__call__.__func__.__doc__ = self.func_doc
+        
+        # config for Data.plot() or Data.plots()
+        self.config = deepcopy(DEFAULT_CONFIG)
+        if hasattr(self.func, 'config'):
+            self.config.update(self.func.config)
     
     def _call_with_ax(self, ax):
         if self.input_ax:
@@ -410,6 +427,12 @@ scatter = plotFuncAx(Scatter())
 @plotFuncAx
 def plot(ax):
     return ax.plot
+def _plot_label(labels):
+    if len(labels) == 1:
+        return {'ylabel': labels[0]} # if only one arg is given, this is y axis rather than x axis
+    else:
+        return dict(zip(['xlabel', 'ylabel', 'zlabel'], labels),), 
+plot.config['ax_label_kwargs_generator'] = _plot_label
 
 @plotFuncAx
 def hist(ax):

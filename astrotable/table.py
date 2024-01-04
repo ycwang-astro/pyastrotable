@@ -280,10 +280,11 @@ class Subset():
         elif type(self.selection) is str:
             if self.expression is None: 
                 self.expression = self.selection
+            if self.name is None:
+                self.name = self.expression
             
             if self.selection in ['all', 'All']:
                 self.selection = np.full(len(data), True)
-            
             else:
                 self.selection = data.eval(self.selection)
                 
@@ -2025,7 +2026,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         '''
         self.col_labels.update(**kwargs)
     
-    def get_labels(self, *cols, listalways=False):
+    def get_labels(self, *cols, listalways=False, eval=False):
         '''
         Get the labels of columns (if not set by ``set_labels``, the column name will be used).
         
@@ -2036,12 +2037,27 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         listalways : bool, optional
             If True, always returns list of labels (even if len(list) == 1).
             The default is False.
+        eval : bool, optional
+            If True, column names that do not belong to this data will be considered as expressions 
+            that can be evaluated with ``Data.eval()``.
+            The default is False.
         
         Returns
         -------
         str or list of str
         '''
-        labels = [self.col_labels[col] if col in self.col_labels else col for col in cols]
+        if not eval:
+            labels = [self.col_labels[col] if col in self.col_labels else col for col in cols]
+        else: # eval
+            labels = []
+            for col in cols:
+                if col in self.col_labels:
+                    labels.append(self.col_labels[col])
+                elif col not in self.colnames:
+                    labels.append(col.replace('$', '\\$')) # 
+                else:
+                    labels.append(col)
+                    
         if len(labels) == 1 and not listalways:
             return labels[0]
         else:
@@ -2199,12 +2215,12 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             label_kwargs = func.config['ax_label_kwargs_generator']
             if ax is not None and columns is not None:
                 ax.set(**label_kwargs(
-                    self.get_labels(*columns, listalways=True),
+                    self.get_labels(*columns, listalways=True, eval=eval),
                     ))
             
             # special case for my scatter()
             if type(func) == plot.PlotFunction and type(func.func) == plot.Scatter and 'c' in kwarg_columns and 'barlabel' not in kwargs:
-                kwargs['barlabel'] = self.get_labels(kwarg_columns['c'])
+                kwargs['barlabel'] = self.get_labels(kwarg_columns['c'], eval=eval)
         
         if iter_kwargs != {}:
             # check values
@@ -2446,7 +2462,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
 
         # special case for my scatter()
         if type(func) == plot.PlotFunction and type(func.func) == plot.Scatter and 'c' in kwarg_columns and 'barlabel' not in kwargs:
-            kwargs['barlabel'] = self.get_labels(kwarg_columns['c'])
+            kwargs['barlabel'] = self.get_labels(kwarg_columns['c'], eval=eval)
 
         if arraygroups is None:
             if axes is None:
@@ -2456,6 +2472,8 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             if fig is None:
                 fig = axes.figure
             ret = self.plot(func(axes), *args, cols=columns, kwcols=kwarg_columns, eval=eval, paths=plotpaths, subsets=plotsubsets, groups=plotgroups, autolabel=autolabel, global_selection=global_selection, verbose=verbose, ax=axes, iter_kwargs=iter_kwargs, **kwargs)
+            if ax_callback is not None:
+                ax_callback(axes)
             self.plot_returns.append(ret)
         
         else:
@@ -2811,7 +2829,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             suggest_names = get_close_matches(item, self.colnames)
             msg = f"'{item}'"
             if suggest_names:
-                msg += ". (did you mean: '{}')".format("', '".join(suggest_names))
+                msg += " (did you mean: '{}')".format("', '".join(suggest_names))
             raise ColumnNotFoundError(msg) from e
         # return Data(self.t[item])
     
@@ -2843,6 +2861,16 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             self.t[item].meta['src_detail'] += '; modified by user'
             self.t[item].meta['set_by_user'] = True
         
+    def __contains__(self, item):
+        if isinstance(item, Subset):
+            for groupname, group in self.subset_groups.items():
+                for subsetname, subset in group.items():
+                    if item is subset:
+                        return True
+            return False
+        else:
+            raise TypeError(f"unsupported type for 'in': {type(item)}")
+    
     #### alternative names
     @property
     def labels(self): # alternative name for col_labels

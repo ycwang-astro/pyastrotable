@@ -359,7 +359,7 @@ class Scatter():
             except ValueError:
                 return False
             else:
-                if not (c.shape == (1, 4) or c.shape == (1, 3)) and carr.size == x.size:
+                if not (carr.shape == (1, 4) or carr.shape == (1, 3)) and carr.size == x.size:
                     return True
                 else:
                     return False
@@ -447,7 +447,19 @@ def hist(ax):
 
 @plotFuncAx
 def hist2d(ax):
-    return ax.hist2d
+    @wraps(ax.hist2d)
+    def _hist2d(x, y, *args, **kwargs):
+        # since plt.hist2d does not handle masked values, let us consider this here
+        # (mask lost in: plt.hist2d -> np.histogram2d -> np.histogramdd -> np.atleast_2d -> call of asanyarray() in np.core.shape_base)
+        mask = np.full(x.shape, False)
+        if np.ma.is_masked(x):
+            mask |= x.mask
+        if np.ma.is_masked(y):
+            mask |= y.mask
+        x = x[~mask]
+        y = y[~mask]
+        return ax.hist2d(x, y, *args, **kwargs)
+    return _hist2d
 
 @plotFuncAx
 def errorbar(ax):

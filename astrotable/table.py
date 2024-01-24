@@ -2615,7 +2615,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         even without e.g. Python's ``pickle`` module. 
         '''
         if format == 'pkl':
-            save_pickle(path, overwrite, self)
+            save_pickle(path, self, yes=overwrite)
             
         elif format == 'data': # save important data in a zip file
             if path[-5:] != '.data':

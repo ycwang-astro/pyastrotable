@@ -125,7 +125,7 @@ class DeprecationError(DeprecationWarning):
 
 #%% interactive functions
 
-def pause_and_warn(message=' ', choose='Proceed?', default = 'n', yes_message='', no_message='raise', timeout=None):
+def pause_and_warn(message=' ', choose='Proceed?', default = 'n', yes_message='', no_message='raise', warn=True, timeout=None):
     '''
     calling this function will do something like this:
             [print]  <message>
@@ -143,7 +143,8 @@ def pause_and_warn(message=' ', choose='Proceed?', default = 'n', yes_message=''
     
     if isinstance(message, Exception):
         message = str(type(message)).replace('<class \'','').replace('\'>', '')+': '+'. '.join(message.args)
-    warnings.warn(message, stacklevel=3)
+    if warn:
+        warnings.warn(message, stacklevel=3)
     print(message)
     
     question = '{} {} >>> '.format(choose, '[y]/n' if default == 'y' else 'y/[n]')
@@ -165,7 +166,7 @@ def pause_and_warn(message=' ', choose='Proceed?', default = 'n', yes_message=''
 
 #%% file IO
 
-def save_pickle(fname, yes=False, *data):
+def save_pickle(fname, *data, yes=False, ext=False):
     '''
     save data to fname
 
@@ -173,13 +174,14 @@ def save_pickle(fname, yes=False, *data):
     ----------
     fname : TYPE
         DESCRIPTION.
-    yes : bool
-        if ``True``, file will be overwritten without asking.
     *data : TYPE
         DESCRIPTION.
-
+    yes : bool
+        if ``True``, file will be overwritten without asking.
+    ext : bool
+        if ``True``, file name will always end with ".pkl"; otherwise use original fname given
     '''
-    if not '.pkl' in fname:
+    if ext and not '.pkl' in fname:
         fname+='.pkl'
     if os.path.exists(fname):
         if os.path.isdir(fname):
@@ -209,8 +211,8 @@ def load_pickle(fname):
         DESCRIPTION.
 
     '''
-    if fname[-4:] != '.pkl':
-        fname+='.pkl'
+    # if fname[-4:] != '.pkl':
+    #     fname+='.pkl'
     with open(fname, 'rb') as f:
         data = pickle.load(f)
         if len(data) == 1:

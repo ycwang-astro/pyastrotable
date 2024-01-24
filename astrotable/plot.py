@@ -179,6 +179,8 @@ def _annotate(x=None, y=None, xpos=.1, ypos=.1, xtxt=None, ytxt=None, xfmt='.2f'
         Keyword arguments for lines.
     '''
     
+    artists = {}
+    
     if ax is None:
         ax = plt.gca()
     xmin, xmax = ax.get_xlim()
@@ -237,7 +239,7 @@ def _annotate(x=None, y=None, xpos=.1, ypos=.1, xtxt=None, ytxt=None, xfmt='.2f'
                 lineymax = (np.log10(y)-np.log10(ymin))/dy if yscale == 'log' else (y-ymin)/dy
             if i != 0:
                 label = None
-            ax.axvline(x, ymax=lineymax, label=label, **lineargs)
+            artists['vline'] = ax.axvline(x, ymax=lineymax, label=label, **lineargs)
             if xpos is not None:
                 plt.pause(.01) # this pause is essential. without this pause, the ScalarFormatter (got by ax.xaxis.get_major_formatter()) has not yet been set, so one always get offset == 1.
                 offset = ax.xaxis.get_major_formatter().get_offset()
@@ -254,7 +256,7 @@ def _annotate(x=None, y=None, xpos=.1, ypos=.1, xtxt=None, ytxt=None, xfmt='.2f'
                     yt = ymin * (ymax/ymin)**ypos
                 else:
                     yt = ymin + ypos * dy
-                ax.text(x, yt, xtxt1, horizontalalignment='center', backgroundcolor='white')
+                artists['vtext'] = ax.text(x, yt, xtxt1, horizontalalignment='center', backgroundcolor='white')
 
     if ploty:
         for i, info in enumerate(zip(ys, yposs, xs)):
@@ -265,7 +267,7 @@ def _annotate(x=None, y=None, xpos=.1, ypos=.1, xtxt=None, ytxt=None, xfmt='.2f'
                 linexmax = (np.log10(x)-np.log10(xmin))/dx if xscale == 'log' else (x-xmin)/dx
             if i != 0 or plotx:
                 label = None
-            ax.axhline(y, xmax=linexmax, label=label, **lineargs)
+            artists['hline'] = ax.axhline(y, xmax=linexmax, label=label, **lineargs)
             if ypos is not None:
                 plt.pause(.01) # this pause is essential. without this pause, the ScalarFormatter (got by ax.xaxis.get_major_formatter()) has not yet been set, so one always get offset == 1.
                 offset = ax.yaxis.get_major_formatter().get_offset()
@@ -282,11 +284,12 @@ def _annotate(x=None, y=None, xpos=.1, ypos=.1, xtxt=None, ytxt=None, xfmt='.2f'
                     xt = xmin * (xmax/xmin)**xpos
                 else:
                     xt = xmin + xpos * dx
-                ax.text(xt, y, ytxt1, verticalalignment='center', backgroundcolor='white')
+                artists['htext'] = ax.text(xt, y, ytxt1, verticalalignment='center', backgroundcolor='white')
 
     if x is not None and y is not None:
-        plt.scatter(x, y, marker=marker, c='k')
+        artists['scat'] = ax.scatter(x, y, marker=marker, c='k')
 
+    return artists
             
 #%% wrapper for plot functions
 def plotFuncAx(f):

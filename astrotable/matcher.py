@@ -13,6 +13,7 @@ from astropy.coordinates import SkyCoord
 import astropy.units as u
 from astropy.units import UnitTypeError
 import warnings
+from collections.abc import Iterable
 
 class UnsafeMatchingWarning(Warning):
     pass
@@ -44,10 +45,31 @@ class ExactMatcher():
         self.value1 = value1
     
     def get_values(self, data, data1, verbose=True):
-        if type(self.value) is str:
-            self.value = data.t[self.value]
-        if type(self.value1) is str:
-            self.value1 = data1.t[self.value1]
+        valuetype, value1type = type(self.value), type(self.value1)
+        if isinstance(self.value, str):
+            self.value = data[self.value]
+        elif isinstance(self.value, Iterable):
+            if not isinstance(self.value, np.ndarray): # Column, MaskedArray, etc. are instances of np.ndarray but will be converted by np.array(), so we need this condition
+                self.value = np.array(self.value)
+        else:
+            raise TypeError(f"expected str or Iterable for 'value', got '{type(self.value)}'")
+        if isinstance(self.value1, str):
+            self.value1 = data1[self.value1]
+        elif isinstance(self.value1, Iterable):
+            if not isinstance(self.value1, np.ndarray): # Column, MaskedArray, etc. are instances of np.ndarray but will be converted by np.array(), so we need this condition
+                self.value1 = np.array(self.value1)
+        else:
+            raise TypeError(f"expected str or Iterable for 'value1', got '{type(self.value1)}'")
+        
+        if hasattr(self.value, 'name'):
+            self.value_name = self.value.name
+        else:
+            self.value_name = valuetype
+        if hasattr(self.value1, 'name'):
+            self.value1_name = self.value1.name
+        else:
+            self.value1_name = value1type
+            
         dup_vals = find_dup(self.value)
         if dup_vals.size > 0:
             warnings.warn(f"Duplications found for data '{data.name}' while matching '{data1.name}' to it: the same row of '{data1.name}' may be matched to multiple rows in '{data.name}'.",
@@ -81,7 +103,7 @@ class ExactMatcher():
         return idx, matched
     
     def __repr__(self):
-        return f"ExactMatcher('{self.value.name}', '{self.value1.name}')"
+        return f'ExactMatcher("{self.value_name}", "{self.value1_name}")'
 
 
 class SkyMatcher():
@@ -248,11 +270,11 @@ class SkyMatcher():
 class IdentityMatcher():
     def __init__(self):
         '''
-        Used to match `astrotable.table.Data` objects `data1` to `data`.
+        Used to match ``astrotable.table.Data`` objects ``data1`` to ``data``.
         Directly match records row by row, i.e. row #1 matched to row #1, row #2 matched to row #2, etc.
         Only possible if ``len(data1) == len(data)``.
         This should be passed to method `data.match()`.
-        See `help(data.match)`.
+        See ``help(data.match)``.
         '''
     
     def get_values(self, data, data1, verbose=True):

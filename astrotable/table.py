@@ -1526,7 +1526,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
     
     #### subsets
     
-    def add_subsets(self, *subsets, group=None):
+    def add_subsets(self, *subsets, group=None, listalways=False):
         '''
         Add subsets to a subset group.
         
@@ -1539,10 +1539,13 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
 
         Parameters
         ----------
-        group : str, optional
-            The name of the subset group. If not specified, the default subset group will be used.
         *subsets : ``astrotable.table.Subset``
             See ``help(astrotable.table.Subset)`` for more information.
+        group : str, optional
+            The name of the subset group. If not specified, the default subset group will be used.
+        listalways : bool, optional
+            If True, always returns list of subsets (even if len(list) == 1).
+            The default is False.
         
         Return
         ------
@@ -1567,7 +1570,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             self.subset_groups[group][name] = subset
             # subset_objects.append(subset)
         # return subset_objects
-        if len(subsets) == 1:
+        if not listalways and len(subsets) == 1:
             return subsets[0]
         else:
             return subsets
@@ -2071,7 +2074,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
     # and translate it to make it the same as columns=('col1', 'col2'), kwarg_columns={'c': 'col3'}.
     @keyword_alias('deprecated', columns='cols', kwarg_columns='kwcols')
     @keyword_alias('accepted', group='groups')
-    def plot(self, func, *args, col_input=None, cols=None, kwcols={}, eval=False, paths=None, subsets=None, groups=None, autolabel=True, ax=None, verbose=True, global_selection=None, title=None, iter_kwargs={}, **kwargs):
+    def plot(self, func, *args, col_input=None, cols=None, kwcols={}, eval=False, eval_kwargs={}, paths=None, subsets=None, groups=None, autolabel=True, ax=None, verbose=True, global_selection=None, title=None, iter_kwargs={}, **kwargs):
         '''
         Make a plot given a plotting function.
         
@@ -2100,6 +2103,10 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             This means that you can not only input column names, but also input expressions. See ``help(Data.eval)`` for the syntax of expressions.
             Otherwise, the names will simply be considered as column names.
             The default is False.
+        eval_kwargs : dict, optional
+            Keyword arguments to be passed to ``Data.eval()`` when evaluating ``cols`` and ``kwcols``. 
+            Ignored if argument ``eval`` set to ``False``.
+            The default is {}.
         paths : str or list of str, optional
             The full path of a subset (e.g. ``'<group_name>/<subset_name>'``) or a list of paths.
             If this is given, arguments ``subsets`` and ``group`` are ignored.
@@ -2248,7 +2255,8 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         
         for subset_data, iter_kwargs in zip(subset_data_list, iter_kwargs_list):
             if eval:
-                get_col = subset_data.eval
+                # get_col = subset_data.eval
+                get_col = lambda column: subset_data.eval(column, **eval_kwargs)
             else:
                 get_col = subset_data.__getitem__
             
@@ -2294,7 +2302,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
     
     @keyword_alias('deprecated', columns='cols', kwarg_columns='kwcols') # deprecated old names
     @keyword_alias('accepted', group='plotgroups', groups='plotgroups', paths='plotpaths', subsets='plotsubsets', ax='axes') # make plot() arguments acceptable here 
-    def plots(self, func, *args, cols=None, kwcols={}, eval=False, plotpaths=None, plotsubsets=None, plotgroups=None, arraygroups=None, global_selection=None, share_ax=False, autobreak=False, autolabel=True, ax_callback=None, returns='fig', verbose=True, axes=None, fig=None, iter_kwargs={}, **kwargs):
+    def plots(self, func, *args, cols=None, kwcols={}, eval=False, eval_kwargs={}, plotpaths=None, plotsubsets=None, plotgroups=None, arraygroups=None, global_selection=None, share_ax=False, autobreak=False, autolabel=True, ax_callback=None, returns='fig', verbose=True, axes=None, fig=None, iter_kwargs={}, **kwargs):
         '''
         Make a plot given the function ``func`` used for plotting.
         
@@ -2351,6 +2359,10 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             This means that you can not only input column names, but also input expressions. See ``help(Data.eval)`` for the syntax of expressions.
             Otherwise, the names will simply be considered as column names.
             The default is False.
+        eval_kwargs : dict, optional
+            Keyword arguments to be passed to ``Data.eval()`` when evaluating ``cols`` and ``kwcols``. 
+            Ignored if argument ``eval`` set to ``False``.
+            The default is {}.
         paths, subsets, groups :
             aliases of "plotpaths", "plotsubsets" and "plotgroups".
         plotpaths : str or list of str, optional
@@ -2471,7 +2483,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
                 axes = axes[0]
             if fig is None:
                 fig = axes.figure
-            ret = self.plot(func(axes), *args, cols=columns, kwcols=kwarg_columns, eval=eval, paths=plotpaths, subsets=plotsubsets, groups=plotgroups, autolabel=autolabel, global_selection=global_selection, verbose=verbose, ax=axes, iter_kwargs=iter_kwargs, **kwargs)
+            ret = self.plot(func(axes), *args, cols=columns, kwcols=kwarg_columns, eval=eval, eval_kwargs=eval_kwargs, paths=plotpaths, subsets=plotsubsets, groups=plotgroups, autolabel=autolabel, global_selection=global_selection, verbose=verbose, ax=axes, iter_kwargs=iter_kwargs, **kwargs)
             if ax_callback is not None:
                 ax_callback(axes)
             self.plot_returns.append(ret)
@@ -2525,7 +2537,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
                     subset_with_global = subset & global_selection
                 else:
                     subset_with_global = subset
-                ret = self.plot(func(ax), *args, cols=columns, kwcols=kwarg_columns, eval=eval, paths=plotpaths, subsets=plotsubsets, groups=plotgroups, autolabel=autolabel, verbose=verbose, ax=ax, global_selection=subset_with_global, title=subset.label, iter_kwargs=iter_kwargs, **kwargs)
+                ret = self.plot(func(ax), *args, cols=columns, kwcols=kwarg_columns, eval=eval, eval_kwargs=eval_kwargs, paths=plotpaths, subsets=plotsubsets, groups=plotgroups, autolabel=autolabel, verbose=verbose, ax=ax, global_selection=subset_with_global, title=subset.label, iter_kwargs=iter_kwargs, **kwargs)
                 self.plot_returns.append(ret)
                 
                 if ax_callback is not None:
@@ -2824,7 +2836,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
     def __getitem__(self, item):
         # warnings.warn('Although supported, it is not suggested to access table by directly subscripting Data objects. Use e.g. data.t[index] instead of data[index].')
         try:
-            return (self.t[item])
+            return self.t[item]
         except KeyError as e:
             suggest_names = get_close_matches(item, self.colnames)
             msg = f"'{item}'"

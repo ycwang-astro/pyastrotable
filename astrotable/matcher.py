@@ -23,7 +23,7 @@ class DuplicationWarning(UnsafeMatchingWarning):
     pass
 
 class ExactMatcher():
-    def __init__(self, value, value1):
+    def __init__(self, value, value1=None):
         '''
         Used to match `astrotable.table.Data` objects `data1` to `data`.
         Match records with exact values.
@@ -36,13 +36,23 @@ class ExactMatcher():
             Specify values for `data` used to match catalogs. Possible inputs are:
             - str, name of the field used for matching.
             - Iterable, values for `data`. `len(value)` should be equal to `len(data)`.
-        value1 : str or Iterable
+        value1 : str or Iterable, optional
             Specify values for `data1` used to match catalogs. Possible inputs are:
             - str, name of the field used for matching.
             - Iterable, values for `data1`. `len(value1)` should be equal to `len(data1)`.
+            
+            If not given and ``value`` is a string, ``value1`` set to the same as ``value``.
         '''
         self.value = value
         self.value1 = value1
+        
+        self.value_name, self.value1_name = f'"{value}"' if isinstance(value, str) else value, f'"{value1}"' if isinstance(value1, str) else value1 # before evaluation, let the input be the names
+        
+        if self.value1 is None:
+            if isinstance(self.value, str):
+                self.value1 = self.value
+            else:
+                raise TypeError("argument missing: 'value1'")
     
     def get_values(self, data, data1, verbose=True):
         valuetype, value1type = type(self.value), type(self.value1)
@@ -62,11 +72,11 @@ class ExactMatcher():
             raise TypeError(f"expected str or Iterable for 'value1', got '{type(self.value1)}'")
         
         if hasattr(self.value, 'name'):
-            self.value_name = self.value.name
+            self.value_name = f'"{self.value.name}"'
         else:
             self.value_name = valuetype
         if hasattr(self.value1, 'name'):
-            self.value1_name = self.value1.name
+            self.value1_name = f'"{self.value1.name}"'
         else:
             self.value1_name = value1type
             
@@ -103,7 +113,7 @@ class ExactMatcher():
         return idx, matched
     
     def __repr__(self):
-        return f'ExactMatcher("{self.value_name}", "{self.value1_name}")'
+        return f'ExactMatcher({self.value_name}, {self.value1_name})'
 
 
 class SkyMatcher():
@@ -265,6 +275,7 @@ class SkyMatcher():
         return d2d.arcsec
         
     def __repr__(self):
+        # TODO: show more information here 
         return f'<SkyMatcher with thres={self.thres}>'
 
 class IdentityMatcher():

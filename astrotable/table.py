@@ -134,7 +134,7 @@ class Subset():
     or ``Subset.eval_`` is called. (This is always called when a subset is defined in ``data.add_subsets()``.)
     Operation before evalutaion may be supported in the future.
     '''
-    def __init__(self, selection, name=None, expression=None, label=None):
+    def __init__(self, selection, name=None, expression=None, label=None, **kwargs):
         '''
         Specify a subset of ``Data``.
 
@@ -161,6 +161,8 @@ class Subset():
         label : str, optional
             The label used in figures. 
             The default is None
+        kwargs : 
+            Arguments passed to ``Data.eval()`` if ``selection`` is evaluated as an expression.
             
         Notes
         -----
@@ -186,6 +188,7 @@ class Subset():
         self.expression = expression
         self.label = label
         self.data_name = None
+        self.kwargs = kwargs
         
     @classmethod
     def by_range(cls, **ranges):
@@ -286,7 +289,7 @@ class Subset():
             if self.selection in ['all', 'All']:
                 self.selection = np.full(len(data), True)
             else:
-                self.selection = data.eval(self.selection)
+                self.selection = data.eval(self.selection, **self.kwargs)
                 
                 ### old implementation below:
                 # # check string: avoid error if the string contains something like "self", "data" but are not real column names
@@ -544,6 +547,11 @@ class Data():
     def path(self):
         return self._path
     
+    @property
+    def shape(self):
+        # return n_row, n_column
+        return len(self), len(self.colnames)
+    
     #### matching & merging 
     def match(self, data1, matcher, verbose=True, replace=False):
         '''
@@ -596,6 +604,11 @@ class Data():
         '''
         if not (isinstance(data1, Data) or type(data1) == type(self)):
             raise TypeError(f"only supports matching 'astrotable.table.Data' type; got {type(data1)}")
+        if inspect.isclass(matcher):
+            try:
+                matcher = matcher()
+            except TypeError as e:
+                raise TypeError(f"{matcher.__name__} is not instantiated") from e
         
         if data1.name in self.matchnames:
             if replace:
@@ -971,13 +984,16 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             keep_unmatched = keep_unmatched[1:]
             if verbose: print(f'[merge] `keep_unmatched` set to all data matched to {self}: {keep_unmatched}')
         
-        matched = np.full((len(self),), True) # whether a record in self is matched to ALL the child data
+        ## prepare variables
+        matched = np.full((len(self),), True) # whether a record in self is matched to ALL (except those in keep_unmatched) the child data
         data1_matched_tables = []
         unnamed_count = 0
         data_names = [self.name]
         data_metas = {self.name: self.meta}
         data_subset_groups = [] # list of cutted subset groups for each data
+        subsets_to_be_added = [] # will be used if matchinfo_subset
         
+        ## merge matchinfo
         self.match_tree(depth=depth, detail=False)
         merged_matchinfo = self.merge_matchinfo(depth=depth)
         
@@ -988,13 +1004,16 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             if matchinfo.data1.name in keep_unmatched and matchinfo.has_child:
                 raise MergeError(f"cannot include data '{matchinfo.data1.name}' in `keep_unmatched`, because {matchinfo.has_child} is/are matched through the intermediary '{matchinfo.data1.name}'")
         
-        ## get matched indices
+        ## get matched indices and handle metadata
         for matchinfo in merged_matchinfo:
             data1 = matchinfo.data1
+            
+            # update ``matched``
             if data1.name not in keep_unmatched:
                 data1_matched = matchinfo.matched
                 matched &= data1_matched # boolean array indicating whether a row of the base data is matched to ALL the child data
                 
+            # collect metadata of matched data and handle unnamed data
             if data1.name is None:
                 unnamed_count += 1
                 data_names.append(str(unnamed_count))
@@ -1021,8 +1040,6 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             subset_groups = Data._cut_subset_groups(self.subset_groups, matched, outname)
             data_subset_groups.append(subset_groups)
         
-        subsets_to_be_added = [] # will be used if matchinfo_subset
-        
         # cut data matched to me
         for matchinfo in merged_matchinfo:
             data1 = matchinfo.data1
@@ -1041,6 +1058,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
                 idx[~data1_matched] = 0 # TODO: DANGER: The masked "data" will be valid values, i.e. the value on the first row! These may emerge when using e.g. np.array, plt.hist2d (which uses np.histogram2d).
                 data1_table = Table(data1_table, masked=True)
                 data1_matched_table = data1_table[idx]
+                # mask values for unmatched records in data1
                 for c in data1_matched_table.columns:
                     miss_val = Data._decide_missing_value(data1_matched_table[c])
                     if miss_val is not None:
@@ -1055,7 +1073,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
                     
                 if matchinfo_subset:
                     subsets_to_be_added.append(Subset(
-                        data1_matched, 
+                        data1_matched[matched], 
                         name=data1.name, 
                         expression=f"<'{data1.name}' matched when merging to '{self.name}'>",
                         label=f"'{data1.name}' matched when merging to '{self.name}'"))
@@ -1400,25 +1418,29 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         result : 
             The result of the evaluation.
         '''
-        locals().update(**kwargs)
+        localvars = locals().copy()
+        localvars.update(**kwargs)
         self._get_colnames_variable()
+        _existing_names = []
         for _colname in self.colnames_as_variables:
-            _existing_names = []
-            if _colname not in locals() and _colname not in globals():
-                locals()[_colname] = self[_colname]
+            if _colname not in localvars and _colname not in globals():
+                # if a column name is not occupied by an existing name,
+                # add it to local namespace
+                localvars[_colname] = self[_colname]
             elif _colname in expression and f"$({_colname})" not in expression:
+                # the expression seems to include this column name, but not in $(column name) format
                 _existing_names.append(_colname)
-            if _existing_names:
-                warnings.warn(f'Column names {_existing_names} coincidence with existing names in the local/global namespace, '\
-                              'thus are not interpretated as column names. '\
-                              "Consider refering column names with $(column name).")
+        if _existing_names:
+            warnings.warn("Column names ['{}'] coincidence with existing names in the local/global namespace, ".format("', '".join(_existing_names)) + \
+                          'thus are not interpretated as column names. '\
+                          "Consider refering column names with $(column name).")
         _eval_expression = re.sub(
             r"\$\((.*?)\)",  # replace $(...)
             lambda match: f"self['{match.group(1)}']", # to self['...']
             expression,
             )
         try:
-            result = eval(_eval_expression)
+            result = eval(_eval_expression, globals(), localvars)
         except SyntaxError as e:
             raise SyntaxError('invalid syntax (are you trying to directly refer to unsupported column names?)') from e
         except NameError as e:
@@ -2838,11 +2860,13 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         try:
             return self.t[item]
         except KeyError as e:
-            suggest_names = get_close_matches(item, self.colnames)
-            msg = f"'{item}'"
+            key = e.args[0]
+            suggest_names = get_close_matches(key, self.colnames)
+            msg = f"'{key}'"
             if suggest_names:
                 msg += " (did you mean: '{}')".format("', '".join(suggest_names))
             raise ColumnNotFoundError(msg) from e
+            
         # return Data(self.t[item])
     
     def __setitem__(self, item, value):
@@ -2882,6 +2906,9 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             return False
         else:
             raise TypeError(f"unsupported type for 'in': {type(item)}")
+    
+    def _ipython_key_completions_(self):
+        return self.colnames
     
     #### alternative names
     @property

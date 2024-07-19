@@ -350,6 +350,7 @@ class Scatter():
         self.params = []
         self.autobar = None
         # self.ax = None
+        # self.s = None
     
     @staticmethod
     def _decide_autobar(c, x, autobar):
@@ -377,6 +378,8 @@ class Scatter():
             param = {key: value for key, value in locals().items() if key not in ('self', 'kwargs')}
             param.update(kwargs)
             self.params.append(param)
+            # if self.s:
+            #     return self.s
         return scatter
     
     def ax_callback(self, ax):
@@ -410,17 +413,17 @@ class Scatter():
                 for param in self.params:
                     param = {key: value for key, value in param.items() if key not in param_exclude}
                     colorparams = {key: value for key, value in barinfo.items() if key in color_param_keys}
-                    s = ax.scatter(**param, **colorparams)
+                    self.s = ax.scatter(**param, **colorparams)
                 
                 # make colorbar
-                cax = plt.colorbar(s, ax=ax)
+                cax = plt.colorbar(self.s, ax=ax)
                 cax.set_label(barinfo.barlabel)
                 
             else:
                 param_exclude = ['autobar', 'barlabel']
                 for param in self.params:
                     param = {key: value for key, value in param.items() if key not in param_exclude}
-                    ax.scatter(**param)
+                    self.s = ax.scatter(**param)
         
         finally:
             self.params = []

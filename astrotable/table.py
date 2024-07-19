@@ -42,7 +42,9 @@ subplot_arrange = {
     1: [1, 1],
     2: [1, 2],
     3: [1, 3],
-    4: [2, 2]
+    4: [2, 2],
+    5: [2, 3],
+    6: [2, 3],
     }
 
 plot_funcs = {
@@ -144,15 +146,15 @@ class Subset():
             If it is iterable, it should be a boolean array indicating whether each row is included in this subset.
             It should have a shape of ``(len(data),)`` where ``data`` is an ``astrotable.table.Data`` instance.  
         
-            If it is callable, should be defined like 
+            If it is callable, it should be defined like below::
             
-                >>> def selection(table): # input: astropy.table.Table object
-                ...     <...>
-                ...     return arr # boolean array 
-                ...                # whether each row is included in subset 
+                def selection(table): # input: astropy.table.Table object
+                    <...>
+                    return arr # boolean array 
+                               # whether each row is included in subset 
             
-            If it is a string, should be expressions using the column names of the data, e.g.
-            ``'(column1 > 0) & (column2 < 1)'``.
+            If it is a string, should be an expression that can be evaluated by ``Data.eval``, e.g.
+            ``'(column1 > 0) & (column2 < 1)'``. Refer to ``help(Data.eval)`` for details.
         name : str, optional
             The name of the subset. The default is None.
         expression : str, optional
@@ -160,7 +162,7 @@ class Subset():
             The default is None.
         label : str, optional
             The label used in figures. 
-            The default is None
+            The default is None.
         kwargs : 
             Arguments passed to ``Data.eval()`` if ``selection`` is evaluated as an expression.
             
@@ -280,16 +282,18 @@ class Subset():
             if self.expression is None: 
                 self.expression = inspect.getsource(self.selection)
             self.selection = self.selection(data.t)
+            # if self.selection.dtype != bool:
+            #     raise TypeError(f"selection function must return ")
         elif type(self.selection) is str:
             if self.expression is None: 
                 self.expression = self.selection
             if self.name is None:
                 self.name = self.expression
             
-            if self.selection in ['all', 'All']:
-                self.selection = np.full(len(data), True)
-            else:
-                self.selection = data.eval(self.selection, **self.kwargs)
+            # if self.selection in ['all', 'All']:
+            #     self.selection = np.full(len(data), True)
+            # else:
+            self.selection = data.eval(self.selection, **self.kwargs)
                 
                 ### old implementation below:
                 # # check string: avoid error if the string contains something like "self", "data" but are not real column names
@@ -315,21 +319,29 @@ class Subset():
                 ### end
                 
         elif isinstance(self.selection, Iterable):
-            if len(self.selection) != len(data):
-                raise ValueError(f'length of array should be {len(data)}, got {len(self.selection)}.')
             if self.expression is None: 
                 self.expression = '<array>'
-            if not isinstance(self.selection, np.ndarray):
-                self.selection = np.array(self.selection)
-                # else: if it is masked, keep it masked (otherwise np.array(self.selection) will get its data only)
-            if self.selection.dtype != bool:
-                self.selection = self.selection.astype(bool)
-            
-            self.selection = self.selection.copy()
 
         else:
-            raise TypeError(f"keyword argument should be function, array-like object or string, got '{type(self.selection)}'.")
-
+            raise TypeError(f"selection of Subset should be function, array-like object or string, got '{type(self.selection)}'.")
+            
+        # make selection a boolean array (if not)
+        if not (isinstance(self.selection, Iterable) and not isinstance(self.selection, str)):
+            raise TypeError(f"selection string or function should return a boolean array, got '{type(self.selection)}'.")
+        # if len(self.selection) != len(data):
+        #     raise ValueError(f'length of array should be {len(data)}, got {len(self.selection)}.')
+        if not isinstance(self.selection, np.ndarray):
+            self.selection = np.array(self.selection)
+            # else: if it is masked, keep it masked (otherwise np.array(self.selection) will get its data only)
+        if self.selection.shape != (len(data),):
+            msg = f"bad selection string/function/array: excepted shape is {(len(data),)}, got {self.selection.shape}"
+            raise ValueError(msg)
+        if self.selection.dtype != bool:
+            warnings.warn('selection array is not boolean: converted to boolean array',
+                          stacklevel=3)
+            self.selection = self.selection.astype(bool)
+        self.selection = self.selection.copy() # TODO: this was initially used for array-like object as input of __init__(). can it be improved?
+        
         # directly fill masked to False (this makes a difference when using e.g. __or__, __invert__)
         if np.ma.is_masked(self.selection):
             self.selection = self.selection.filled(False) # IMPORTANT: Masked elements do NOT belong to this subset!
@@ -413,7 +425,7 @@ class Subset():
     
     def __array__(self):
         if not hasattr(self.selection, 'dtype') or self.selection.dtype != bool: #not isinstance(self.selection, Iterable):
-            raise RuntimeError('Selection should be a boolean array. Maybe forgot to run eval_()?')
+            raise TypeError('Selection should be a boolean array. Maybe forgot to run eval_()?')
         if np.ma.is_masked(self.selection): # this never happens after I directly fill masked to False. This is kept to handle instances of old versions.
             return self.selection.filled(False) # IMPORTANT: Masked elements do NOT belong to this subset!
         else:
@@ -426,8 +438,13 @@ class Subset():
     def __repr__(self):
         # return f"Subset('{self.selection}')"
         # return f"Subset(name='{self.name}', selection={self.selection.__repr__()})"
+        namestr = f"Subset '{self.name}'" if self.name is not None else 'Unnamed Subset'
         datastr = f" of Data '{self.data_name}'" if self.data_name is not None else ''
-        return f"<Subset '{self.name}'{datastr} ({self.size}/{len(self)})>"
+        try:
+            fracstr = f' ({self.size}/{len(self)})'
+        except TypeError: # from __array__
+            fracstr = ''
+        return f"<{namestr}{datastr}{fracstr}>"
     
     def __setstate__(self, state):
         # Call __init__() to initialize some attributes in case not provided by state.
@@ -447,21 +464,21 @@ class Data():
       If ``data.t`` is changed, the matching and subset information may be inconsistent with the table.
       Create a new ``Data`` instance instead.
     '''
-    def __init__(self, data, name=None, **kwargs):
+    def __init__(self, data=None, name=None, **kwargs):
         '''
         
 
         Parameters
         ----------
-        data : str, `astropy.table.Table`, etc.
-            path to the data file, an `astropy.table.Table` object, or anything that can be initialized as an `astropy.table.Table` object by `astropy.table.Table.read`.
+        data : str, ``astropy.table.Table``, etc.
+            Path to the data file, an ``astropy.table.Table`` object, or anything that can be initialized as an ``astropy.table.Table`` object.
         name : str, optional
             The name of this Data object. This name will be used in many cases to distinguish datasets. The default is None.
         **kwargs : 
-            Keyword arguments passed to `astropy.table.Table.read`, 
-            if a str is passed to argument `data`.
-
+            Keyword arguments passed when initializing an ``astropy.table.Table`` object. 
         '''
+            # Keyword arguments passed to ``astropy.table.Table.read()`` (if a str is passed to argument `data`),
+            # or ``astropy.table.Table()`` (if applicable).
         if type(data) is str and 'format' in kwargs and kwargs['format'] in ['data', 'pkl']: # should use Data.load
             raise ValueError(f"to load data file saved with Data.save, use Data.load('{data}', format='{kwargs['format']}')")
         
@@ -482,10 +499,10 @@ class Data():
             self._path = '(initialized from Table)'
         # for large ascii files, loading with pd abd converting it to astropy.table.Table seems to be faster
         elif has_pd and type(data) == pd.DataFrame:
-            self.t = Table.from_pandas(data)
+            self.t = Table.from_pandas(data, **kwargs)
             self._path = '(initialized from DataFrame)'
         else: # try to convert to data
-            self.t = Table(data)
+            self.t = Table(data, **kwargs)
             self._path = f'(initalized from a {type(data)} object)'
         self.meta['path'] = self._path
          
@@ -550,6 +567,7 @@ class Data():
     @property
     def shape(self):
         # return n_row, n_column
+        # this is compatible with spyder_kernels.utils.nsview.get_size (priority: shape -> size -> __len__)
         return len(self), len(self.colnames)
     
     #### matching & merging 
@@ -899,7 +917,13 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         elif kind in 'O': # object
             miss = 'N/A'
         elif kind in 'S': # (byte-)string
-            pass
+            n = col.dtype.itemsize
+            if n == 1:
+                return '?'
+            elif n == 2:
+                return 'NA'
+            else:
+                return 'N/A'
         elif kind in 'U': # Unicode
             n = col.dtype.itemsize / 4
             if n == 1:
@@ -923,13 +947,14 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         ----------
         depth : int, optional
             The depth of merging.
-            For example, if depth == 1, only the direct children (without grandchildren) of 
+            For example, if ``depth == 1``, only the direct children (without grandchildren) of 
             this data are merged.
-            if depth == -1, all children (including all grandchildren) are merged.
+            if ``depth == -1``, all children (including all grandchildren) are merged.
             The default is -1.
         keep_unmatched : Iterable, optional
             A list of names of `astrotable.table.Data` objects (you can check the names with e.g. `data.name`).
             A record (row) of THIS data is kept even if a dataset in the above list cannot be matched to this data.
+            To set ``keep_unmatched`` for all data, pass ``keep_unmatched=True``.
             The default is [] (which means that only those that can be matched to each child data of this data are kept).
         merge_columns : dict, optional
             A dict that specifies fields (columns) to be merged.
@@ -973,7 +998,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             from 'data1'.
         '''
         # if keep_unmatched:
-        #     raise NotImplementedError('Until a bug is fixed, the "keep_unmatched" feature is disabled. Sorry.')
+        #     raise NotImplementedError('Until a bug is fixed, the "keep_unmatched" feature is disabled.')
         #     # say we have the matching: cat1 <- cat2 <- cat3. If we do not require match with cat2, and 
         #     # cat3 may be directly matched to cat1, then some rows with cat1, cat3 but not cat2 are missing.
         
@@ -996,6 +1021,10 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         ## merge matchinfo
         self.match_tree(depth=depth, detail=False)
         merged_matchinfo = self.merge_matchinfo(depth=depth)
+        
+        if len(merged_matchinfo) == 0:
+            warnings.warn(f'nothing is matched to {self}', 
+                          stacklevel=2)
         
         ## check keep_unmatched
         if self.name in keep_unmatched:
@@ -1027,6 +1056,12 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             
         if unnamed_count > 0 and verbose:
             print(f'found no names for {unnamed_count} sets of data, automatically named with numbers.')
+        
+        # check possible mispellings of data names in keep_unmatched, merge_columns, ignore_columns
+        for n in chain(keep_unmatched, merge_columns.keys(), ignore_columns.keys()):
+            if n not in data_names:
+                warnings.warn(f'No data named "{n}" is matched: did you mispell the name?',
+                              stacklevel=2)
         
         ## cut data and subsets (if needed) ##
         # cut myself
@@ -1063,6 +1098,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
                     miss_val = Data._decide_missing_value(data1_matched_table[c])
                     if miss_val is not None:
                         data1_matched_table[c][~data1_matched] = miss_val
+                        data1_matched_table[c].fill_value = miss_val # this avoids cases where the numpy's defult fill_value is already present in the (unmasked) data
                     data1_matched_table[c].mask[~data1_matched]=True
                 data1_matched_table = data1_matched_table[matched]
                 
@@ -1171,7 +1207,8 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             cat2 (loaded from "cat2.csv")
             
         '''
-        warnings.warn('WARNING: The information for user-added columns may be invalid.')
+        warnings.warn('WARNING: The information for user-added columns may be invalid.',
+                      stacklevel=2)
         if colname is None:
             return OrderedDict((name, self.from_which(name, detail=detail)) for name in self.colnames)
         elif colname not in self.colnames:
@@ -1295,7 +1332,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             
     def match_tree(self, depth=-1, detail=True):
         '''
-        Generate a "match tree", showing all data that can be matched and merged to this data.
+        Print a "match tree", showing all data that can be matched and merged to this data.
         
         The data that are directly matched to this data are called "chilren" of this data, and are on "depth 1".
         The data directly matched to data on "depth 1" are on "depth 2", etc.
@@ -1442,9 +1479,11 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         try:
             result = eval(_eval_expression, globals(), localvars)
         except SyntaxError as e:
-            raise SyntaxError('invalid syntax (are you trying to directly refer to unsupported column names?)') from e
+            msg = 'invalid syntax (are you trying to directly refer to unsupported column names?)'
+            raise SyntaxError(msg) from e
         except NameError as e:
-            raise NameError(f"Unrecognized name '{e.name}'. Check if you have misspelled a column name. If you are using a name defined in your script, consider passing '{e.name}={e.name}' when calling eval().") from e
+            msg = f"Unrecognized name '{e.name}'. Check if you have misspelled a column name. If you are using a name defined in your script, consider passing '{e.name}={e.name}' when calling eval()."
+            raise NameError(msg) from e
             
         if to_col is not None:
             self[to_col] = result
@@ -1484,9 +1523,15 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         
         if not self.t.masked:
             self.t = Table(self.t, masked=True, copy=False)  # convert to masked table
-            
+        
+        def isnan(value):
+            try:
+                return np.isnan(value)
+            except TypeError:
+                return False
+        
         for col in cols:
-            if np.isnan(missval):
+            if isnan(missval):
                 mask = np.isnan(self.t[col])
                 n_miss = np.sum(mask)
             else:
@@ -2260,6 +2305,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
                     raise ValueError(f"len of iter_kwargs '{key}' should be {len(subset_data_list)}, got {len(values)}")
             # get kwargs for each subset
             iter_kwargs_list = [dict(zip(iter_kwargs.keys(), value)) for value in zip(*(iter_kwargs[i] for i in iter_kwargs))]
+            # TODO: support specifying iter_kwargs using dict {subset_name: value} 
         else:
             iter_kwargs_list = repeat({})
         
@@ -2525,31 +2571,32 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             else: # len(subsets) == 1
                 subset_array = subsets
                 
-            # decide nrow and ncol and check inputs
-            if len(subsets) == 1 and autobreak: # autobreak is not a comprehensive function
-                if len(subsets[0]) in subplot_arrange:
-                    nrow, ncol = subplot_arrange[len(subsets[0])]
-                else:
-                    pass # TODO: not implemented
-            else:
-                nrow, ncol = len(subset_array), len(subset_array[0])
-            figsize = [6.4*(1+.7*(ncol-1)), 4.8*(1+.7*(nrow-1))]
-            
             # prepare and check consistency with axes
+            nrow, ncol = len(subset_array), len(subset_array[0])
             if axes is None:
                 if fig is None:
+                    figsize = [6.4*(1+.7*(ncol-1)), 4.8*(1+.7*(nrow-1))]
                     fig = plt.figure(figsize=figsize)
-                axes = fig.subplots(nrow, ncol)
+                if fig.axes:
+                    axes = fig.axes
+                else: # fig is empty: create axes
+                    if autobreak and len(subsets) == 1: # autobreak is not a comprehensive function
+                        # decide nrow and ncol if autobreak
+                        if len(subsets[0]) in subplot_arrange:
+                            nrow, ncol = subplot_arrange[len(subsets[0])]
+                        else:
+                            pass # nrow, ncol = 1, len(subsets[0]) # TODO: not implemented
+                    axes = fig.subplots(nrow, ncol)
             else:
                 if fig is None:
                     if isinstance(axes, Iterable):
-                        fig = axes.flatten()[0]
+                        fig = axes.ravel()[0].figure
                     else:
                         fig = axes.figure
                 if not isinstance(axes, Iterable):
                     axes = [axes]
             axes = np.array(axes)
-            axes_flat = axes.flatten()
+            axes_flat = axes.ravel()
             if len(axes_flat) != nrow*ncol:
                 raise ValueError(f'Expected {nrow}*{ncol}={nrow*ncol} axes; got {len(axes)}.')
             
@@ -2910,13 +2957,27 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
     def _ipython_key_completions_(self):
         return self.colnames
     
-    #### alternative names
+    #### alternative names and abbreviations
+    def df(self, index=None, use_nullable_int=True): # convenient method to get the pandas DataFrame from data
+        return self.t.to_pandas(index=index, use_nullable_int=use_nullable_int)
+    
+    def ssdf(self, group=None, index=None, use_nullable_int=True):
+        return self.subset_summary(group=group).to_pandas(index=index, use_nullable_int=use_nullable_int)
+    
     @property
     def labels(self): # alternative name for col_labels
         return self.col_labels
     
-    def df(self, index=None, use_nullable_int=True): # convenient method to get the pandas DataFrame from data
-        return self.t.to_pandas(index=index, use_nullable_int=use_nullable_int)
-    
-    subsets = subset_data # another name for subset_data
+    # subsets = subset_data # another name for subset_data
     subplot_array = plots
+    
+    ## abbreviations for methods
+    cols = colnames
+    tree = match_tree
+    mm = mskmis = mask_missing
+    chkdup = checkdup = check_duplication
+    adsub = add_subsets
+    gs = subs = gtsub = get_subsets
+    subdat = subset_data
+    ss = subsum = subset_summary
+        

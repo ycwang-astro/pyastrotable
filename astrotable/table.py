@@ -20,6 +20,7 @@ from collections.abc import Iterable
 from collections import OrderedDict, Counter
 import inspect
 from itertools import repeat, chain
+from functools import wraps
 import os
 import zipfile
 import pickle
@@ -69,6 +70,12 @@ class FailedToLoadError(Exception):
     pass
 
 class FailedToEvaluateError(Exception):
+    pass
+
+class SubsetError(Exception):
+    pass
+
+class SubsetInconsistentError(SubsetError):
     pass
 
 class MergeError(Exception):
@@ -130,6 +137,13 @@ class Subset():
     For example, you can get the intersection set ``subset1 & subset2``,
     the union set ``subset1 | subset2``, and the complementary set ``~subset1``.
     
+    Note that the name (will be auto-generated if not given) is used as the address of a subset in a ``data``.
+    If you add a subset to a certain subset group in which the name is already used by another subset, 
+    the original subset will be replaced and no longer recognized as part of that ``data``::
+        s1 = data.add_subsets(Subset(<...>, name='subset'))
+        s2 = data.add_subsets(Subset(<...>, name='subset')) # this replaces the original subset at 'default/subset'
+        s1 in data, s2 in data # (False, True)
+    
     Notes for developers
     --------------------
     Currently, the '&', '|', '~' operations can only be performed if selection is an boolean array,
@@ -177,10 +191,33 @@ class Subset():
               according to the mapping of dict ``data.col_labels``.
               
         If the input/evaluation of ``selection`` is/results in a masked (boolean) array, the masked elements 
-        are always filled with False (which means that they do NOT belong to this subset).
+        are filled with False (which means that they are NOT included in this subset by definition).
         This often happens when ``selection`` is calculated from a masked column of the table.
         The final ``selection`` after executing the ``eval_`` method is never a masked array.
-
+        
+        **Caveat**. Subsets constructed with ``expr`` and ``~expr`` are NOT necessarily complements of each other!
+        See the below example::
+            >>> from astrotable.table import Data, Subset
+            >>> d = Data(name='test')
+            >>> d['x'] = [-1, 1, -99]
+            >>> d.mask_missing(missval=-99)
+            [mask missing] col 'x': 1/3 (33.33%) masked (value: -99).
+            >>> s1 = d.add_subsets(Subset('x < 0'))
+            >>> s2 = d.add_subsets(Subset('~(x < 0)'))
+            >>> s21 = d.add_subsets(Subset('x >= 0'))
+            >>> s1, s1.selection
+            (<Subset 'x < 0' of Data 'test' (1/3)>, array([ True, False, False]))
+            >>> s2, s2.selection
+            (<Subset '~(x < 0)' of Data 'test' (1/3)>, array([False,  True, False]))
+            >>> s21, s21.selection
+            (<Subset 'x >= 0' of Data 'test' (1/3)>, array([False,  True, False]))
+            >>> (~s1), (~s1).selection
+            (<Subset 'NOT(x < 0)' of Data 'test' (2/3)>, array([False,  True,  True]))
+            >>> (~s2), (~s2).selection
+            (<Subset 'NOT(~(x < 0))' of Data 'test' (2/3)>, array([ True, False,  True]))
+            >>> (~s21), (~s21).selection
+            (<Subset 'NOT(x >= 0)' of Data 'test' (2/3)>, array([ True, False,  True]))
+        
         '''
         if name is not None and '/' in name:
             raise ValueError('"/" not supported in Subset names')
@@ -189,8 +226,20 @@ class Subset():
         self.name = name 
         self.expression = expression
         self.label = label
-        self.data_name = None
+        # self.data_name = None
+        self._data = None
         self.kwargs = kwargs
+    
+    @property
+    def data(self):
+        return self._data
+    
+    @property
+    def data_name(self):
+        if self.data is None:
+            return None
+        else:
+            return self.data.name
         
     @classmethod
     def by_range(cls, **ranges):
@@ -275,7 +324,14 @@ class Subset():
             This is used to generate automatic subset names.
             The default is ().
         '''
-        self.data_name = data.name
+        # detects dangerous operations of re_evaluating a subset with a different data while it is still recorded in a data
+        if (self.data is not None and self.data is not data # re-evaluating? 
+            and self in self.data # but self is still in self.data?
+            ):
+            raise SubsetInconsistentError(f"{self} already added to {self.data}")
+        
+        # self.data_name = data.name
+        self._data = data
         
         # get selection array and expression
         if callable(self.selection):
@@ -343,7 +399,8 @@ class Subset():
         self.selection = self.selection.copy() # TODO: this was initially used for array-like object as input of __init__(). can it be improved?
         
         # directly fill masked to False (this makes a difference when using e.g. __or__, __invert__)
-        if np.ma.is_masked(self.selection):
+        # if np.ma.is_masked(self.selection): # this returns False unless the input is a MaskedArray *containing masked values*
+        if isinstance(self.selection, np.ma.MaskedArray): # this makes sure the selection of Subset is never masked array
             self.selection = self.selection.filled(False) # IMPORTANT: Masked elements do NOT belong to this subset!
 
         # get name
@@ -365,7 +422,7 @@ class Subset():
         for colname, labelstr in data.col_labels.items():
             self.label = self.label.replace(colname, labelstr)
     
-    def _cut(self, index, data_name):
+    def _cut(self, index, new_data=None):
         # return a cutted Subset (cutted with ``index``)
         cutted_subset = Subset(
             self.selection[index], # Note: this is not a copy of self.selection. This is not a problem, since the array it refers to is never modified in the code.
@@ -373,20 +430,53 @@ class Subset():
             self.expression,
             self.label,
             )
-        cutted_subset.data_name = data_name
+        # cutted_subset.data_name = data_name
+        if new_data is not None:
+            cutted_subset._data = new_data
         return cutted_subset
     
     @property
     def size(self): # the size of the subset
         return np.sum(np.array(self))
     
+    @staticmethod
+    def _merge_data_info(method):
+        # this is a decorator
+        # merge data info of the two subsets for binary operators
+        @wraps(method)
+        def new_method(self, subset):
+            # data_recorded = self.data is not None and subset.data is not None
+            # if ((data_recorded and self.data is not subset.data)
+            #     or self.data_name != subset.data_name):
+            if self.data is not subset.data:
+                warnings.warn(f"trying to broadcast together subsets of two different Data: \n{self} and {subset}",
+                              stacklevel=2 + 1) # add 1 when using @_check_operand
+            new_subset = method(self, subset)
+            # if self.data_name == subset.data_name:
+            #     new_subset.data_name = self.data_name
+            # if data_recorded and self.data is subset.data:
+            if self.data is subset.data:
+                new_subset._data = self.data
+            return new_subset
+        return new_method
+    
+    @staticmethod
+    def _check_operand(method):
+        # this is a decorator
+        # check if operand is Subset
+        @wraps(method)
+        def new_method(self, subset):
+            if not isinstance(subset, self.__class__):
+                return NotImplemented
+            return method(self, subset)
+        return new_method
+        
+    @_check_operand
+    @_merge_data_info
     def __and__(self, subset): # the & (bitwise AND)
-        if self.data_name != subset.data_name:
-            warnings.warn(f"trying to broadcast together subsets of two different Data: \n{self} and {subset}",
-                          stacklevel=2)
         selection = self.selection & subset.selection
-        name = f'{self.name} & {subset.name}'
-        expression = f'({self.expression}) & ({subset.expression})'
+        name = f'{self.name} AND {subset.name}'
+        expression = f'({self.expression}) AND ({subset.expression})'
         if self.label != 'All' and subset.label != 'All':
             label = f'{self.label}, {subset.label}'
         elif self.label == 'All':
@@ -395,32 +485,28 @@ class Subset():
             label = f'{self.label}'
         
         new_subset = Subset(selection, name, expression, label)
-        if self.data_name == subset.data_name:
-            new_subset.data_name = self.data_name
         return new_subset
     
+    @_check_operand
+    @_merge_data_info
     def __or__(self, subset): # the | (bitwise OR)
-        if self.data_name != subset.data_name:
-            warnings.warn(f"trying to broadcast together subsets of two different Data: \n{self} and {subset}",
-                          stacklevel=2)
         selection = self.selection | subset.selection
-        name = f'{self.name} | {subset.name}'
-        expression = f'({self.expression}) | ({subset.expression})'
+        name = f'{self.name} OR {subset.name}'
+        expression = f'({self.expression}) OR ({subset.expression})'
         label = f'[{self.label}] or [{subset.label}]'
         
         new_subset = Subset(selection, name, expression, label)
-        if self.data_name == subset.data_name:
-            new_subset.data_name = self.data_name
         return new_subset
     
     def __invert__(self): # the ~ (bitwise NOT)
         selection = ~self.selection
-        name = f'~({self.name})'
-        expression = f'~({self.expression})'
+        name = f'NOT({self.name})'
+        expression = f'NOT({self.expression})'
         label = f'not [{self.label}]'
         
         new_subset = Subset(selection, name, expression, label)
-        new_subset.data_name = self.data_name
+        # new_subset.data_name = self.data_name
+        new_subset._data = self.data
         return new_subset
     
     def __array__(self):
@@ -439,16 +525,26 @@ class Subset():
         # return f"Subset('{self.selection}')"
         # return f"Subset(name='{self.name}', selection={self.selection.__repr__()})"
         namestr = f"Subset '{self.name}'" if self.name is not None else 'Unnamed Subset'
-        datastr = f" of Data '{self.data_name}'" if self.data_name is not None else ''
+        if self.data is not None:
+            datastr = " of Data " 
+            datastr += f"'{self.data_name}'" if self.data_name is not None else 'without name'
+        else:
+            datastr = ''
         try:
             fracstr = f' ({self.size}/{len(self)})'
         except TypeError: # from __array__
             fracstr = ''
         return f"<{namestr}{datastr}{fracstr}>"
     
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        del state['_data'] # data should not be pickled
+        return state
+    
     def __setstate__(self, state):
         # Call __init__() to initialize some attributes in case not provided by state.
-        # this can be useful when restoring Subset from a pkl file of an older version (that may lack ``self.data_name``).
+        # This can be useful when restoring Subset from a pkl file of an older version (that may lack ``self.data_name``).
+        # Also, ``self.data`` is not pickled and will be initialized as None.
         self.__init__(None)
         # Restore instance attributes
         self.__dict__.update(state)
@@ -539,7 +635,8 @@ class Data():
         
         # subset
         self.subset_all = Subset(np.ones(len(self)).astype(bool), name='all', expression='all', label='All') # subset named "all"
-        self.subset_all.data_name = self.name
+        # self.subset_all.data_name = self.name
+        self.subset_all._data = self
         self.subset_groups = {
             'default': {'all': self.subset_all}
             }
@@ -813,12 +910,12 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         return outinfo
     
     @staticmethod
-    def _cut_subset_groups(subset_groups, index, new_name):
+    def _cut_subset_groups(subset_groups, index, new_data=None):
         # cut each subset with [index]
         subset_groups = deepcopy(subset_groups)
         for group in subset_groups:
             for subset in subset_groups[group]:
-                subset_groups[group][subset] = subset_groups[group][subset]._cut(index, new_name)
+                subset_groups[group][subset] = subset_groups[group][subset]._cut(index, new_data)
         return subset_groups
     
     @staticmethod
@@ -838,7 +935,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         all0 = data_subset_groups[0]['default']['all']
         l = len(all0)
         subset_all = Subset(np.ones(l).astype(bool), name='all', expression='all', label='All') # subset named "all"
-        subset_all.data_name = all0.data_name
+        # subset_all.data_name = all0.data_name
         
         merged_subset_groups = {
             'default': {'all': subset_all},
@@ -1072,7 +1169,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             data.remove_columns(ignore_columns[self.name])
         
         if keep_subsets:
-            subset_groups = Data._cut_subset_groups(self.subset_groups, matched, outname)
+            subset_groups = Data._cut_subset_groups(self.subset_groups, matched)
             data_subset_groups.append(subset_groups)
         
         # cut data matched to me
@@ -1103,9 +1200,9 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
                 data1_matched_table = data1_matched_table[matched]
                 
                 if keep_subsets:
-                    subset_groups = Data._cut_subset_groups(data1.subset_groups, idx, outname)
+                    subset_groups = Data._cut_subset_groups(data1.subset_groups, idx)
                     subset_groups = Data._mask_subset_groups(subset_groups, ~data1_matched)
-                    subset_groups = Data._cut_subset_groups(subset_groups, matched, outname)
+                    subset_groups = Data._cut_subset_groups(subset_groups, matched)
                     
                 if matchinfo_subset:
                     subsets_to_be_added.append(Subset(
@@ -1118,7 +1215,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
                 data1_matched_table = data1_table[idx[matched]]
                 
                 if keep_subsets:
-                    subset_groups = Data._cut_subset_groups(data1.subset_groups, idx[matched], outname)
+                    subset_groups = Data._cut_subset_groups(data1.subset_groups, idx[matched])
             
             data1_matched_tables.append(data1_matched_table)
             
@@ -1136,6 +1233,9 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         # merge subsets
         if keep_subsets:
             merged_subset_groups = Data._merge_subset_groups(data_subset_groups, data_names)
+            for groupname, group in merged_subset_groups.items():
+                for subsetname, subset in group.items():
+                    subset._data = matched_data
             matched_data.subset_groups = merged_subset_groups
         
         # add subsets if matchinfo_subset
@@ -1593,7 +1693,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
     
     #### subsets
     
-    def add_subsets(self, *subsets, group=None, listalways=False):
+    def add_subsets(self, *subsets, group=None, listalways=False, verbose=True):
         '''
         Add subsets to a subset group.
         
@@ -1602,17 +1702,21 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         
         Beware that a subset does not "watch" the changes in the data:
         once added to the data, it never changes, even if the data changes.
-        If you would like to update your subset, you may add it again to overwrite the old one.
+        If you would like to update your subset, you may add it again to replace the old one.
 
         Parameters
         ----------
         *subsets : ``astrotable.table.Subset``
+            The subsets to be added to this group.
             See ``help(astrotable.table.Subset)`` for more information.
         group : str, optional
             The name of the subset group. If not specified, the default subset group will be used.
         listalways : bool, optional
             If True, always returns list of subsets (even if len(list) == 1).
             The default is False.
+        verbose : bool, optional
+            Whether or not information is printed on the screen.
+            The default is True.
         
         Return
         ------
@@ -1625,18 +1729,23 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             group = 'default'
         if group == '$unmasked':
             raise ValueError("Subset group '$unmasked' is a special group that cannot be modified.")
-            
         elif group not in self.subset_groups.keys():
             self.subset_groups[group] = {} # create the new group
+            
         # subset_objects = []
+        subset_overwritten = []
         for subset in subsets:
             subset.eval_(self, self.subset_groups[group].keys())
             name = subset.name
             if group == 'default' and name == 'all':
                 raise ValueError("Subset name 'all' in the 'default' group is reserved and cannot be re-written.")
+            if name in self.subset_groups[group].keys():
+                subset_overwritten.append(f'{group}/{name}')
             self.subset_groups[group][name] = subset
             # subset_objects.append(subset)
         # return subset_objects
+        if verbose and subset_overwritten:
+            print("[add_subsets] subset(s) at '{}' replaced".format("', '".join(subset_overwritten)))
         if not listalways and len(subsets) == 1:
             return subsets[0]
         else:
@@ -1758,7 +1867,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         else:
             warnings.warn(f"group name '{group}' does not exist, no need to clear")
     
-    def get_subsets(self, path=None, name=None, group=None, listalways=False):
+    def get_subsets(self, path=None, name=None, group=None, listalways=False, force=False):
         '''
         Get a subset (or several subsets) given the subset groups, subset names 
         or paths (i.e. ``'<group_name>/<subset_name>'``)
@@ -1773,6 +1882,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         path : str or list of str, optional
             The path or a list of paths.
             If this is given, arguments ``name`` and ``group`` are ignored.
+            If this argument itself is a ``Subset`` object, this object itself is returned.
             The default is None.
         name : str or list of str, optional
             The names of subsets, or a list of names. 
@@ -1782,6 +1892,11 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         listalways : bool, optional
             If True, always returns list of subsets (even if len(list) == 1).
             The default is False.
+        force : bool, optional
+            Relevant only when ``path`` is a ``Subset`` object. 
+            If this ``Subset`` object is not a subset of this data, an exception will be raised.
+            Setting ``force`` to True will force the operation to proceed without an exception. 
+            Default is False.
 
         Returns
         -------
@@ -1831,6 +1946,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
                 warnings.warn('Since the argument "path" is given, arguments "name"/"group" are ignored.',
                               stacklevel=2)
             if isinstance(path, Subset): # it is itself a Subset!
+                self._check_subset_association(path, action = 'warn' if force else 'raise')
                 return path
             if type(path) is str:
                 if listalways:
@@ -1936,6 +2052,65 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
         else:
             raise ValueError(f"unrecognized special subset group: '{group}'")
     
+    def _subset_associates(self, subset):
+        if not isinstance(subset, Subset):
+            raise TypeError('expected a Subset')
+        # return subset in self or subset.data is self
+        return subset.data is self
+    
+    def _check_subsets_consistency(self):
+        consist_dict = {}
+        for groupname, group in self.subset_groups.items():
+            consist_dict[groupname] = {}
+            for subsetname, subset in group.items():
+                if subset.data is None:
+                    consist_label = None
+                elif subset.data is self:
+                    consist_label = True
+                else:
+                    consist_label = False # however, this should not happen
+                consist_dict[groupname][subsetname] = consist_label
+        return consist_dict
+    
+    def _check_subset_association(self, subset, action='raise'):
+        '''
+        Checks if ``subset`` describes a subset of ``self``.
+        This is done by checking if the data recorded (if any) by ``subset`` is ``self``.
+        
+        Note that the condition this method checks is weaker than requiring ``subset in self``.
+        A subset can be no longer recognized by Data ``self`` (possibly because of 
+        replacing a subset at a certain path with a new subset);
+        However, if this subset recognizes itself as a subset of ``self``,
+        this method also returns True.
+
+        Parameters
+        ----------
+        subset : Subset
+            A Susbet.
+        action : str, optional
+            What to do if ``subset`` seems NOT to be associated with ``self``.
+            If set to 'raise', an exception will be raised 
+            if ``subset`` seems not to be a subset of ``self``.
+            If set to 'warn', a warning is generated.
+            If set to 'quiet', no exception or warning will be generated.
+            The default is 'raise'.
+        '''
+        # original version was checking if ``subset in self`` 
+        # or the data recorded (if any) by ``subset`` is ``self``.
+        if self._subset_associates(subset):
+            return True
+        else:
+            msg = f'{subset} is not a subset of {self}'
+            if action in [True, 'raise', 'error', 'exception']:
+                raise TypeError(msg)
+            elif action in ['warn', 'warning']:
+                warnings.warn(msg, stacklevel=3)
+            elif action in [False, 'quiet']:
+                pass
+            else:
+                raise ValueError(f"unexpected action '{action}'")
+            return False
+    
     def _data_from_subset(self, subsets, minimal=False):
         '''
         Returns the sub-dataset from ``Subset`` objects
@@ -1985,7 +2160,7 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
                     })
                 
                 # handle subsets
-                subset_data.subset_groups = Data._cut_subset_groups(self.subset_groups, index, new_name)
+                subset_data.subset_groups = Data._cut_subset_groups(self.subset_groups, index, subset_data)
             
             subset_datas.append(subset_data)
         if return_list:
@@ -2743,9 +2918,17 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
                 
                 # save save_meta
                 with datazip.open('.save_meta.json', mode='w') as f:
-                    meta = json.dumps(Data.save_meta, indent=4)
+                    save_meta = self.__class__.save_meta
+                    meta = json.dumps(save_meta, indent=4)
                     meta = bytes(meta, 'ascii')
                     f.write(meta)
+                    
+                # save subset_data_consist
+                with datazip.open('.subset_data_consist.json', mode='w') as f:
+                    consist_dict = self._check_subsets_consistency()
+                    subset_data_consist = json.dumps(consist_dict, indent=4)
+                    subset_data_consist = bytes(subset_data_consist, 'ascii')
+                    f.write(subset_data_consist)
                         
         else:
             self.t.write(path, format=format, overwrite=overwrite)
@@ -2790,7 +2973,13 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
                     else:
                         save_meta = None
                         data_to_save, table_ext, table_format = Data._old_data_to_save, Data._old_table_ext, Data._old_table_format
-                        
+                    
+                    if '.subset_data_consist.json' in datazip.namelist():
+                        with datazip.open('.subset_data_consist.json') as f:
+                            subset_data_consist = json.load(f)
+                    else:
+                        subset_data_consist = None
+                    
                     for attr, method in data_to_save.items():
                         if method == 'astropy.table':
                             fname = attr + table_ext
@@ -2821,6 +3010,23 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
                 raise
             dataname = attrs['name'] if 'name' in attrs else None
             data = cls(attrs['t'], name=dataname)
+
+            # initialize subsets
+            if 'subset_groups' in attrs:
+                subset_groups = attrs['subset_groups']
+                if subset_data_consist is None: # for older versions
+                    for groupname, group in subset_groups.items():
+                        for subsetname, subset in group.items():
+                            subset._data = data
+                else:
+                    for groupname, group in subset_groups.items():
+                        for subsetname, subset in group.items():
+                            consist = subset_data_consist[groupname][subsetname]
+                            if consist is True:
+                                subset._data = data
+                            else: # False, None # for newer versions, this will not happen
+                                raise SubsetError('unexpected inconsistency between subsets and data')
+
             update_names = [i for i in attrs if i not in ['name', 't']] # attrs that need to be updated
             for name in update_names:
                 if name == 'meta': # a special case: can't set attribute 'meta'
@@ -2945,6 +3151,22 @@ Set 'replace=True' to replace the existing match with '{data1.name}'.")
             self.t[item].meta['set_by_user'] = True
         
     def __contains__(self, item):
+        '''
+        Checks if this ``Data`` contains an ``item``.
+
+        Parameters
+        ----------
+        item : ``Subset``
+            Depending on the type of ``item``.
+            
+            ``Subset``:
+                Returns ``True`` if ``item`` is recorded as one of the subsets of this ``Data``.
+                (See also: ``Data._check_subset_association``)
+
+        See also
+        --------
+        ``Data._check_subset_association``
+        '''
         if isinstance(item, Subset):
             for groupname, group in self.subset_groups.items():
                 for subsetname, subset in group.items():

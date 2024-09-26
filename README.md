@@ -1,5 +1,14 @@
 # A Python package with tools for table operation
 
+## Rename Notice
+The package `astrotable` has been renamed to [PyTTOP](https://github.com/ycwang-astro/pyttop) and will be available on PyPI once it is ready. For any new code, please install and import `pyttop` instead of `astrotable`. 
+
+To maintain compatability with existing code, you can continue using `astrotable` without changes. However, starting from version 0.5.0, `astrotable` will require the installation of `pyttop` and will import objects directly from the `pyttop` package. Until `pyttop` is published on PyPI, you will need to manually install `pyttop` (see the instructions [here](https://github.com/ycwang-astro/pyttop)) before installing `astrotable` using `pip`. Otherwise, `pip` will not be able to find the `pyttop` package.
+
+-----
+
+## Introduction
+
 `astrotable` is a Python package that provides tools for operations on catalogs and tables, especially those common in astronomy. The aim is to make table operations as simple and intuitive as possible. Mainly based on `astropy`, this package helps you match, analyze and visualize catalogs. 
 
 Of course, you can do anything you want with `astropy`, `numpy`, `matplotlib`, etc., but this package is designed for lazy people who would like to do some common operations in a simple and intuitive way.

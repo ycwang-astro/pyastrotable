@@ -1,9 +1,10 @@
 # A Python package with tools for table operation
 
 ## Rename Notice
-The package `astrotable` has been renamed to [PyTTOP](https://github.com/ycwang-astro/pyttop) and will be available on PyPI once it is ready. For any new code, please install and import `pyttop` instead of `astrotable`. 
+The package `astrotable` has been renamed to [PyTTOP](https://github.com/ycwang-astro/pyttop), which is available on PyPI. For any new code, please install and import `pyttop` instead of `astrotable`. 
 
-To maintain compatability with existing code, you can continue using `astrotable` without changes. However, starting from version 0.5.0, `astrotable` will require the installation of `pyttop` and will import objects directly from the `pyttop` package. Until `pyttop` is published on PyPI, you will need to manually install `pyttop` (see the instructions [here](https://github.com/ycwang-astro/pyttop)) before installing `astrotable` using `pip`. Otherwise, `pip` will not be able to find the `pyttop` package.
+To maintain compatability with existing code, you can continue using `astrotable` without changes. However, starting from version 0.5.0, `astrotable` will require the installation of `pyttop` and will import objects directly from the `pyttop` package. 
+
 
 -----
 

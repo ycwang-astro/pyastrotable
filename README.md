@@ -26,20 +26,26 @@ To install this package, run:
 pip install git+https://github.com/ycwang-astro/pyastrotable.git
 ```
 
-## Documentation
+## Documentation & tutorials
 For tutorials, see [tutorial on matching](tutorials/tutorial1_matching.ipynb) and [tutorial on subsets and plots](tutorials/tutorial2_subset_and_plot.ipynb).
 
-## Future updates
-Planned future updates:
-- More documentation and demostrations
-- New feature: convenient plotting functions
+## Version history
+### 0.1.x (Aug 2022)
+Initial release: functions for matching and merging.
 
-## Changelog
-### 0.2.0
+### 0.2.x (Dec 2022)
 New features:
-- Row subsets or groups of row subsets of catalogs
-- Easily making plots comparing different subsets
-- Applying functions to each row of the catalog
+- Support for row subsets and groups of row subsets in tables.
+- Added methods to easily generate plots comparing different subsets.
+- Enabled applying functions to each row of the catalog.
 
-### 0.3.0 
-Coming soon
+### 0.3.x (Jan 2023)
+Main updates: 
+- Improved plotting support.
+
+### 0.4.x (Aug 2023)
+Main updates:
+- Improved and fixed tree matching and merging.
+
+### 0.5.x (Sep 2024)
+Package renamed; retained for backward compatibility.
